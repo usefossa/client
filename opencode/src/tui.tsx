@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { Plugin } from "@opencode/plugin/tui";
-import { createEffect, createMemo, createSignal, onCleanup, untrack } from "solid-js";
+import { createEffect, createMemo, createSignal, onCleanup, untrack } from "opentui:runtime-module:solid-js";
 import { Fossa } from "./rpc";
 import { installModelPicker } from "./model-picker";
 import { createModelSource } from "./model-source";

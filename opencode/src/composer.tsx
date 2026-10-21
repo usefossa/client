@@ -1,6 +1,7 @@
 import type { BoxRenderable, Renderable, TextRenderable } from "@opentui/core";
 import type { Context } from "@opencode/plugin/tui/context";
-import { onCleanup } from "solid-js";
+import { onCleanup } from "opentui:runtime-module:solid-js";
+import { jsx } from "opentui:runtime-module:%40opentui%2Fsolid%2Fjsx-runtime";
 import { providerRow } from "./provider-row";
 import type { ModelDetails } from "./types";
 
@@ -13,7 +14,9 @@ export function installComposer(context: Context, details: () => ModelDetails | 
   const stopSlot = context.ui.slot({ append: "prompt.footer", render: input => {
     const mount: Mount = { normal: () => input.mode === "normal" }; mounts.add(mount);
     onCleanup(() => { clear(mount); mounts.delete(mount); });
-    return <box id="fossa-composer-anchor" visible={false} ref={node => { mount.anchor = node; }}><text ref={node => { mount.sample = node; }} /></box>;
+    return jsx("box", { id: "fossa-composer-anchor", visible: false, ref: (node: BoxRenderable) => { mount.anchor = node; },
+      get children() { return jsx("text", { ref: (node: TextRenderable) => { mount.sample = node; } }); },
+    });
   } });
   const draw = async () => {
     const available = balance();

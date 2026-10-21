@@ -4,6 +4,7 @@ import { createTestRenderer } from "@opentui/core/testing";
 import type { Context } from "@opencode/plugin/tui/context";
 import { installModelPicker } from "../src/model-picker";
 import type { ModelDetails } from "../src/types";
+import { getOwner } from "solid-js";
 
 const find = (node: Renderable, id: string): Renderable | undefined => node.id === id ? node : node.getChildren().map(child => find(child, id)).find(Boolean);
 const model: ModelDetails = { id: "fixture/model", name: "Fixture model", settings: { mode: "balanced", minSpeed: 0, zdrOnly: false }, offers: [
@@ -13,6 +14,7 @@ const model: ModelDetails = { id: "fixture/model", name: "Fixture model", settin
 
 for (const wrappers of [0, 3]) test(`native provider pane matches selector, recenters, and toggles with ${wrappers} wrappers`, async () => {
   const t = await createTestRenderer({ width: 170, height: 50 });
+  const owner = getOwner();
   const focused = RGBA.fromHex("#303030"), base = RGBA.fromHex("#101010"), text = RGBA.fromHex("#ffffff"), muted = RGBA.fromHex("#808080"), accent = RGBA.fromHex("#bb88ff"), blue = RGBA.fromHex("#4488ff");
   const overlay = new BoxRenderable(t.renderer, { width: "100%", height: "100%", position: "absolute", alignItems: "center", paddingTop: 10 });
   const shell = new BoxRenderable(t.renderer, { width: 60, height: 16, backgroundColor: base });
@@ -34,7 +36,7 @@ for (const wrappers of [0, 3]) test(`native provider pane matches selector, rece
   const context = {
     renderer: t.renderer, client: { rpc: () => ({ model: async () => { queries++; return structuredClone(model); } }) },
     storage: { store: () => [preference, async (update: (draft: typeof preference) => void) => { await Promise.resolve(); update(preference); }] },
-    keymap: { commands: () => [{ id: "model.dialog.favorite" }, { id: "occupied" }], shortcuts: (id: string) => id === "occupied" ? ["ctrl+g"] : id === command?.id && command.bind ? [command.bind] : [], layer: (factory: () => { commands: typeof command[] }) => { command = factory().commands[0]; } },
+    keymap: { commands: () => [{ id: "model.dialog.favorite" }, { id: "occupied" }], shortcuts: (id: string) => id === "occupied" ? ["ctrl+g"] : id === command?.id && command.bind ? [command.bind] : [], layer: (factory: () => { commands: typeof command[] }) => { expect(getOwner()).toBe(owner); command = factory().commands[0]; } },
     data: { location: { model: { list: () => [{ id: model.id, name: model.name, providerID: "fossa" }] }, provider: { list: () => [{ name: "Fossa" }] } } },
     theme: { text: { base: text, muted }, surface: () => ({ background: { base, action: { primary: { focused } } }, hue: { accent: { 200: accent }, interactive: { 200: blue } } }) },
   } as unknown as Context;

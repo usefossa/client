@@ -3,7 +3,7 @@ import type { SessionMessageAssistant } from "@opencode/client";
 import type { Context } from "@opencode/plugin/tui/context";
 import { Fossa } from "./rpc";
 import type { RoutedRequest } from "./types";
-import { createEffect, createMemo, createSignal, untrack } from "solid-js";
+import { createEffect, createMemo, createSignal, untrack } from "opentui:runtime-module:solid-js";
 import { visibleNodes } from "./render-tree";
 
 // native v2 has no assistant-footer slot; append a host text span without replacing its styles.

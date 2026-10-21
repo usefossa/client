@@ -1,6 +1,6 @@
 import type { BoxRenderable, ScrollBoxRenderable, TextRenderable, Renderable } from "@opentui/core";
 import type { Context } from "@opencode/plugin/tui/context";
-import { createEffect, createRoot, untrack } from "solid-js";
+import { createEffect, createRoot, untrack } from "opentui:runtime-module:solid-js";
 import { createModelSource, type ModelSource } from "./model-source";
 import { openProvider } from "./provider-row";
 import { isText, textOf, visibleNodes } from "./render-tree";
@@ -23,7 +23,7 @@ type Row = { box: BoxRenderable; dot: TextRenderable; name: TextRenderable; deta
 
 // native constructors keep opentui inside the host's rendering runtime.
 export function installModelPicker(context: Context, suppliedSource?: ModelSource) {
-  return createRoot(disposeRoot => {
+  const picker = createRoot(disposeRoot => {
     const source = suppliedSource ?? createModelSource(context), renderer = context.renderer;
     const [appearance, saveAppearance] = context.storage.store("appearance", { initial: { modelPane: true } });
     let pendingEnabled: boolean | undefined, toggleRevision = 0, saving = Promise.resolve();
@@ -36,8 +36,6 @@ export function installModelPicker(context: Context, suppliedSource?: ModelSourc
       try { await (saving = saving.catch(() => {}).then(() => saveAppearance(draft => { draft.modelPane = next; }))); }
       finally { if (revision === toggleRevision) pendingEnabled = undefined; renderer.requestRender(); }
     };
-    const binding = untrack(() => freeBinding(context));
-    context.keymap.layer(() => ({ mode: "global", commands: [{ id: commandId, title: "Toggle Fossa model pane", group: "Fossa", palette: true, bind: binding, run: () => { void toggle().catch(error => context.ui.toast.show({ title: "Fossa", message: String(error), variant: "error" })); } }] }));
     const active = () => context.keymap.commands().some(command => command.id === "model.dialog.favorite");
     let inventory: unknown, cachedModels: { id: string; name: string }[] = [], providers: unknown, cachedCategories = new Set<string>();
     const models = () => { const next = context.data.location.model.list(context.location); if (next !== inventory) { inventory = next; cachedModels = (next ?? []).filter(model => model.providerID === "fossa"); } return cachedModels; };
@@ -173,4 +171,8 @@ export function installModelPicker(context: Context, suppliedSource?: ModelSourc
     const dispose = () => { stopped = true; renderer.removeFrameCallback(scan); clear(); disposeRoot(); if (!suppliedSource) source.dispose(); };
     return Object.assign(dispose, { enabled, toggle, active });
   });
+  // register from the caller so the host can attach its keymap provider when setup has no owner.
+  const binding = untrack(() => freeBinding(context));
+  context.keymap.layer(() => ({ mode: "global", commands: [{ id: commandId, title: "Toggle Fossa model pane", group: "Fossa", palette: true, bind: binding, run: () => { void picker.toggle().catch(error => context.ui.toast.show({ title: "Fossa", message: String(error), variant: "error" })); } }] }));
+  return picker;
 }
