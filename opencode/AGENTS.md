@@ -2,7 +2,7 @@
 
 follow [shared rules](../AGENTS.md). current entrypoints and commands are defined in `package.json`.
 
-canonical client repository: private `usefossa/client`, plugin under `opencode/`. install with `bun install && bun run install:local`; default api `https://api.fossa.ag`, overridden through installer `FOSSA_API_URL` or plugin `options.apiUrl`. client must not read backend `config.toml`. installer replaces previous fossa source entries while preserving unrelated opencode configuration and wallet data.
+canonical client repository: public `usefossa/client`, plugin under `opencode/`. install with `bun install && bun run install:local`; default api `https://api.fossa.ag`, overridden through installer `FOSSA_API_URL` or plugin `options.apiUrl`. client must not read backend `config.toml`. installer replaces previous fossa source entries while preserving unrelated opencode configuration and wallet data.
 
 ## native experience
 
