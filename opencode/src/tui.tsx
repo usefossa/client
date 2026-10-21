@@ -20,6 +20,7 @@ export default Plugin.define({
     const models = createModelSource(context), stopModels = installModelPicker(context, models), dialog = settingsDialog(context), rpc = context.client.rpc(Fossa);
     const [state, setState] = createSignal<Status>({ stage: "connecting", connected: false, paidAtomic: "0", message: "Connect Fossa with /connect." });
     const [details, setDetails] = createSignal<ModelDetails>();
+    const [modelError, setModelError] = createSignal<string>();
     const [unlockRequest, setUnlockRequest] = createSignal<UnlockRequest>();
     const instance = randomUUID();
     let stopped = false, updating = false, loadingModel = false, attached = false, lastUnlockRequest = "";
@@ -35,13 +36,13 @@ export default Plugin.define({
       const selected = context.ui.model.current(); if (selected?.providerID !== "fossa" || loadingModel || stopped) return;
       loadingModel = true;
       try { const value = await models.get(selected.modelID, true); if (!stopped && context.ui.model.current()?.modelID === selected.modelID) setDetails(value); }
-      catch { /* keep last live provider preview during reconnect */ }
+      catch (error) { if (!stopped && context.ui.model.current()?.modelID === selected.modelID) setModelError(errorMessage(error)); }
       finally { loadingModel = false; }
     };
     const modelKey = createMemo(() => { const selected = context.ui.model.current(); return selected ? `${selected.providerID}/${selected.modelID}` : ""; });
     createEffect(() => {
-      const key = modelKey(); setDetails(undefined);
-      if (key.startsWith("fossa/")) onCleanup(models.watch(context.ui.model.current()!.modelID, value => { if (value && !stopped) setDetails(value); }));
+      const key = modelKey(); setDetails(undefined); setModelError(undefined);
+      if (key.startsWith("fossa/")) onCleanup(models.watch(context.ui.model.current()!.modelID, (value, error) => { if (!stopped) { setDetails(value); setModelError(error); } }));
     });
     const stopEvents = rpc.events.on("updated", event => { setState(value => ({ ...value, ...event.data })); });
     const stopUnlock = rpc.events.on("unlockRequired", event => {
@@ -305,7 +306,7 @@ export default Plugin.define({
       { id: "fossa.unlock", title: "Unlock Fossa wallet", group: "Fossa", palette: true, enabled: () => state().security?.protected === true && !state().security?.unlocked, run: external(async () => { await unlock(); }) },
       { id: "fossa.lock", title: "Lock Fossa wallet", group: "Fossa", palette: true, enabled: () => state().security?.protected === true && state().security?.unlocked === true, run: external(async () => { await rpc.lock({}); await sync(); }) },
     ] }));
-    const stopComposer = installComposer(context, details, () => dollars(state().balanceAtomic), openPrice, openSpeed);
+    const stopComposer = installComposer(context, details, () => dollars(state().balanceAtomic), openPrice, openSpeed, modelError);
     const stopFooters = installMessageFooters(context);
     return () => { stopped = true; clearInterval(timer); stopEvents(); stopUnlock(); stopFooters(); stopComposer(); stopModels(); models.dispose(); dialog.close(); };
   },

@@ -8,7 +8,7 @@ import type { ModelDetails } from "./types";
 type Mount = { anchor?: BoxRenderable; sample?: TextRenderable; normal: () => boolean; top?: BoxRenderable; bottom?: BoxRenderable; balance?: TextRenderable; inputs?: readonly unknown[] };
 const remove = (node?: Renderable) => { if (node && !node.isDestroyed) { node.parent?.remove(node); node.destroyRecursively(); } };
 
-export function installComposer(context: Context, details: () => ModelDetails | undefined, balance: () => string, openPrice: () => void, openSpeed: () => void) {
+export function installComposer(context: Context, details: () => ModelDetails | undefined, balance: () => string, openPrice: () => void, openSpeed: () => void, error: () => string | undefined) {
   const mounts = new Set<Mount>();
   const clear = (mount: Mount) => { remove(mount.top); remove(mount.bottom); mount.top = undefined; mount.bottom = undefined; mount.balance = undefined; mount.inputs = undefined; };
   const stopSlot = context.ui.slot({ append: "prompt.footer", render: input => {
@@ -19,7 +19,7 @@ export function installComposer(context: Context, details: () => ModelDetails | 
     });
   } });
   const draw = async () => {
-    const available = balance();
+    const available = balance(), failure = error();
     for (const mount of mounts) {
       const { anchor, sample } = mount, footer = anchor?.parent, prompt = footer?.parent;
       if (!anchor || anchor.isDestroyed || !sample || sample.isDestroyed || !footer || !prompt) continue;
@@ -29,13 +29,13 @@ export function installComposer(context: Context, details: () => ModelDetails | 
       const composer = prompt.getChildren().find(node => !node.id.startsWith("fossa-") && "borderColor" in node) as BoxRenderable | undefined;
       const border = theme.hue.accent[200], background = theme.background.raised.base;
       const value = details(), home = context.ui.router.current().type === "home";
-      const inputs = [home, value, border, background, composer?.customBorderChars, context.renderer.width < 44, theme.text.base, theme.text.muted, focus.background.action.primary.focused, focus.text.action.primary.focused];
+      const inputs = [home, value, failure, border, background, composer?.customBorderChars, context.renderer.width < 44, theme.text.base, theme.text.muted, focus.background.action.primary.focused, focus.text.action.primary.focused];
       if (!mount.bottom || mount.bottom.isDestroyed || inputs.some((value, index) => value !== mount.inputs?.[index])) {
         clear(mount); mount.inputs = inputs;
         if (home) {
           mount.top = new Box(context.renderer, { id: "fossa-composer-provider", marginBottom: 1, flexShrink: 0 });
-          if (value?.offers[0]) mount.top.add(providerRow(context, sample, value.offers[0], true, "fossa-composer-offer"));
-          else mount.top.add(new Text(context.renderer, { content: value ? "No providers match your filters." : "Loading providers…", fg: theme.text.muted }));
+          if (value?.offers[0] && !failure) mount.top.add(providerRow(context, sample, value.offers[0], true, "fossa-composer-offer"));
+          else mount.top.add(new Text(context.renderer, { content: failure ?? (value ? "No providers match your filters." : "Loading providers…"), fg: theme.text.muted }));
           prompt.add(mount.top, 0);
         }
         mount.bottom = new Box(context.renderer, { id: "fossa-composer-filters", border: ["left"], borderColor: border, customBorderChars: composer?.customBorderChars, marginBottom: 1, flexShrink: 0 });

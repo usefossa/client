@@ -78,7 +78,7 @@ export default Plugin.define({
       }
       return client;
     })().finally(() => { activating = undefined; });
-    const requireClient = async () => { const value = await active(); if (!value) throw new FossaError("AUTH_REQUIRED", "Connect a Fossa wallet with /connect or opencode auth login fossa."); return value; };
+    const requireClient = async () => { const value = await active(); if (!value) throw new FossaError("AUTH_REQUIRED", "Run /connect to connect your Fossa account."); return value; };
     const localToken = randomBytes(32).toString("hex");
     function startTransport(cfg: PublicConfig): Bun.Server<undefined> {
       const transport = Bun.serve<undefined>({ hostname: "127.0.0.1", port: 0, idleTimeout: 0, maxRequestBodySize: cfg.opencode.maxRequestBytes, async fetch(request) {
