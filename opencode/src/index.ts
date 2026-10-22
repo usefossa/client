@@ -87,6 +87,8 @@ export default Plugin.define({
         const cancel = () => { void value?.cancel(call).catch(() => {}); };
         request.signal.addEventListener("abort", cancel, { once: true });
         try {
+          const transportReceivedAt = Date.now(), hookAt = Number(request.headers.get("x-fossa-request-at"));
+          const modelRequestAt = Number.isSafeInteger(hookAt) && hookAt > 0 && hookAt <= transportReceivedAt ? hookAt : undefined;
           value = await requireClient();
           if (!store.unlocked(value.account.walletId)) throw new FossaError("WALLET_LOCKED", "Enter your passphrase to unlock your Fossa wallet, then send your message again.");
           const parsed = await request.json() as Record<string, unknown>, model = catalog?.models.find(model => model.id === parsed.model);
@@ -97,7 +99,7 @@ export default Plugin.define({
           delete parsed.max_completion_tokens;
           parsed.max_tokens = Math.min(typeof requested === "number" ? requested : model.settings?.maxTokens ?? model.outputTokens ?? 0, model.outputTokens ?? 0);
           const body = JSON.stringify(parsed);
-          const routed = await value.request(call, model.id, body, request.headers.get("x-fossa-session") ?? "", request.headers.get("x-fossa-kind") ?? "primary", request.signal);
+          const routed = await value.request(call, model.id, body, request.headers.get("x-fossa-session") ?? "", request.headers.get("x-fossa-kind") ?? "primary", request.signal, { modelRequestAt, transportReceivedAt });
           const outbound = new Request(routed.url, { method: "POST", headers: routed.headers, body: routed.body, signal: AbortSignal.any([request.signal, AbortSignal.timeout(Math.max(1, routed.deadline - Date.now()))]), redirect: "error" });
           let response: Response;
           for (let attempt = 0; ; attempt++) {
@@ -216,7 +218,7 @@ export default Plugin.define({
       }),
     });
     await ctx.session.hook("title", event => { event.result = generate({ exactly: 1, minLength: 4, maxLength: 7, seed: event.sessionID, join: "" }).toLowerCase(); }, { providerID: "fossa" });
-    await ctx.session.hook("model.request", event => { event.baseURL = `${backend().transport.url.origin}/v1`; event.headers["x-fossa-call-id"] = randomUUID(); event.headers["x-fossa-local"] = localToken; event.headers["x-fossa-session"] = event.sessionID; event.headers["x-fossa-kind"] = event.kind; }, { providerID: "fossa" });
+    await ctx.session.hook("model.request", event => { event.baseURL = `${backend().transport.url.origin}/v1`; event.headers["x-fossa-call-id"] = randomUUID(); event.headers["x-fossa-request-at"] = String(Date.now()); event.headers["x-fossa-local"] = localToken; event.headers["x-fossa-session"] = event.sessionID; event.headers["x-fossa-kind"] = event.kind; }, { providerID: "fossa" });
     await ctx.session.hook("retry", event => { event.decision = { retry: false }; notify(); }, { providerID: "fossa" });
     function update(): Promise<void> { return refreshRunning ??= (async () => {
       try {

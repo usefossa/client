@@ -107,6 +107,7 @@ async function fixture(customError = 2) {
   expect(client["chain"]).toBeDefined();
   return { client, store, account, provider, owner, bookData, tokenData, cfg, catalog,
     catalogReads: () => catalogReads,
+    publish: (value: unknown) => { for (const socket of sockets) if (socket.data.live) socket.send(JSON.stringify(value)); },
     publishCatalog: () => { for (const socket of sockets) if (socket.data.live) socket.send(JSON.stringify({ type: "catalog", data: catalog })); },
     addBooking: async () => { const address = (await Keypair.generate()).publicKey.toString(), data = Buffer.from(bookData); data[148] = 5; data.writeBigUInt64LE(0n, 152); records.set(address, { data, owner: program }); client.wallet!.bookings.push({ address, status: 5, generation: "0", rentPayer: owner.publicKey.toString() }); return address; },
     staleBooking: () => { client.wallet!.bookings.unshift({ address: deleted, status: 5, generation: "0", rentPayer: owner.publicKey.toString() }); },
@@ -484,5 +485,44 @@ providerTest("cancellation during signing discards unsubmitted bytes without jou
     tx.sign = async (...signers) => { const result = await sign(...signers); controller.abort(); return result; };
     await expect(f.client["journal"](tx, [f.owner], { ...row, id: "discarded" }, 0, controller.signal)).rejects.toThrow();
     expect(f.store.request("discarded", f.account.wallet)).toBeUndefined(); expect(f.submissions()).toBe(1);
+  } finally { await f.close(); }
+});
+
+providerTest("confirmed receipt wakes booking reuse and records consecutive request gaps", async () => {
+  const f = await fixture(), model = f.catalog.models[0];
+  const body = JSON.stringify({ model: model.id, messages: [{ role: "user", content: "Hello" }], max_tokens: 128 });
+  try {
+    await f.client.request("gap-first", model.id, body, "gap-session", "primary", new AbortController().signal);
+    f.client.dispatched("gap-first", Date.now());
+    const request = new Request("http://127.0.0.1/inference", { headers: { "x-fossa-call-id": "gap-first" } });
+    await f.client.response(request, new Response('data: {"usage":{"prompt_tokens":1,"completion_tokens":1}}\n\ndata: [DONE]\n\n', { headers: { "content-type": "text/event-stream" } })).text();
+    const first = f.store.request("gap-first", f.account.wallet)!;
+    expect(first.responseCompleted).toBe(true);
+    expect(first.firstByteAt!).toBeLessThanOrEqual(first.responseDoneAt!);
+    expect(first.responseDoneAt!).toBeLessThanOrEqual(first.responseFinishedAt!);
+    const refreshed = f.client.refresh;
+    // no timer or http history refresh may release this request in the fixture.
+    await f.client.refresh(); f.client.refresh = async () => {};
+    const modelRequestAt = Date.now();
+    const next = f.client.request("gap-next", model.id, body, "gap-session", "primary", new AbortController().signal, { modelRequestAt, transportReceivedAt: modelRequestAt });
+    const waiting = Date.now() + 1000;
+    while (!f.client["walletWaiters"].size && Date.now() < waiting) await Bun.sleep(1);
+    expect(f.client["walletWaiters"].size).toBe(1);
+    f.bookData[148] = 5;
+    f.publish({ type: "wallet", data: await f.client.snapshot() });
+    const receipt = { owner: f.account.wallet, provider: f.provider.publicKey.toString(), booking: first.booking, generation: first.generation, charge: "1", slot: 100 };
+    f.publish({ type: "receipt", commitment: "processed", data: receipt });
+    await Bun.sleep(10); expect(f.submissions()).toBe(1);
+    f.publish({ type: "receipt", commitment: "confirmed", data: receipt });
+    await next; f.client.dispatched("gap-next", Date.now());
+    const second = f.store.request("gap-next", f.account.wallet)!;
+    expect(f.store.request("gap-first", f.account.wallet)?.stage).toBe("settled");
+    expect(second.previousRequestId).toBe(first.id);
+    expect(second.requestGapMs).toBe(modelRequestAt - first.responseFinishedAt!);
+    expect(second.gapToSubmitMs).toBe(second.submittedAt! - first.responseFinishedAt!);
+    expect(second.gapToProviderMs).toBe(second.providerDispatchedAt! - first.responseFinishedAt!);
+    expect(second.bookingPoolWaitMs).toBeGreaterThan(0);
+    expect(f.submissions()).toBe(2);
+    f.client.refresh = refreshed;
   } finally { await f.close(); }
 });

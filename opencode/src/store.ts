@@ -11,7 +11,7 @@ import { FossaError, type Account, type Settings, type WalletSecrets } from "./t
 
 const derive = (passphrase: string, salt: Buffer) => new Promise<Buffer>((resolve, reject) => scrypt(passphrase, salt, 32, { N: 65536, r: 8, p: 1, maxmem: 128 * 1024 * 1024 }, (error, key) => error ? reject(error) : resolve(key)));
 type Sealed = { protection?: "device" | "passphrase"; salt: string; iv: string; tag: string; ciphertext: string };
-export interface Pending { cancelRequested?: boolean; cancelSent?: boolean; id: string; wallet: string; model: string; bodyHash: string; cache?: { messages: number; prefix: string }; kind: string; flow?: string; session: string; booking: string; generation: string; signature: string; transaction: string; expiry: number; reserve: string; stage: string; provider?: string; providerName?: string; endpoint?: string; claimEnd?: number; charge?: string; deposit?: string; withdrawal?: string; refund?: string; feeLamports?: string; processedSlot?: number; startedAt?: number; submittedAt?: number; prepareMs?: number; broadcastMs?: number; processedMs?: number; bookingSource?: "stream" | "rpc"; dispatchStarted?: boolean; providerRequestMs?: number; sendToProviderMs?: number; usage?: { input: number; cached: number; output: number }; created: number; error?: string }
+export interface Pending { previousRequestId?: string; previousResponseFinishedAt?: number; requestGapMs?: number; gapToSubmitMs?: number; gapToProviderMs?: number; modelRequestAt?: number; transportReceivedAt?: number; walletLockMs?: number; recoveryWaitMs?: number; admissionWaitMs?: number; bookingPoolWaitMs?: number; bookingObservedAt?: number; providerDispatchedAt?: number; responseHeadersAt?: number; firstByteAt?: number; responseDoneAt?: number; responseFinishedAt?: number; responseCompleted?: boolean; settlementSlot?: number; settledAt?: number; confirmationMs?: number; cancelRequested?: boolean; cancelSent?: boolean; id: string; wallet: string; model: string; bodyHash: string; cache?: { messages: number; prefix: string }; kind: string; flow?: string; session: string; booking: string; generation: string; signature: string; transaction: string; expiry: number; reserve: string; stage: string; provider?: string; providerName?: string; endpoint?: string; claimEnd?: number; charge?: string; deposit?: string; withdrawal?: string; refund?: string; feeLamports?: string; processedSlot?: number; startedAt?: number; submittedAt?: number; prepareMs?: number; broadcastMs?: number; processedMs?: number; bookingSource?: "stream" | "rpc"; dispatchStarted?: boolean; providerRequestMs?: number; sendToProviderMs?: number; usage?: { input: number; cached: number; output: number }; created: number; error?: string }
 
 export function validatePassphrase(value: unknown): asserts value is string {
   if (typeof value !== "string" || value.length < 3) throw new FossaError("WEAK_PASSPHRASE", "Use a local wallet passphrase of at least 3 characters.");
@@ -121,6 +121,10 @@ export class Store {
   request(id: string, wallet: string) { const row = this.db.query("SELECT state FROM pending WHERE id=? AND wallet=?").get(id, wallet) as { state: string } | null; return row ? JSON.parse(row.state) as Pending : undefined; }
   put(value: Pending) {
     const previous = this.request(value.id, value.wallet);
+    if (previous?.settlementSlot !== undefined && previous.booking === value.booking && previous.generation === value.generation
+      && (value.settlementSlot === undefined || previous.settlementSlot >= value.settlementSlot)) {
+      value.stage = previous.stage; value.charge = previous.charge; value.settlementSlot = previous.settlementSlot; value.settledAt = previous.settledAt;
+    }
     if (previous?.cancelRequested) value.cancelRequested = true;
     if (previous?.cancelSent) value.cancelSent = true;
     if (value.cancelRequested && !["settled", "released", "failed", "expired"].includes(value.stage)) value.stage = "uncertain";

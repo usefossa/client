@@ -27,6 +27,7 @@ export class FossaClient {
   private rpc!: Connection; private socket?: WebSocket; private retry?: ReturnType<typeof setTimeout>; private timer?: ReturnType<typeof setInterval>;
   private chainUntil = 0; private catalogAt = 0; private walletAt = 0; private stopped = false; private refreshing?: Promise<void>;
   private catalogWaiters = new Set<() => void>();
+  private walletWaiters = new Set<() => void>();
   private catalogVersion = 0;
   private watchers = new Map<string, (info: AccountInfo<Uint8Array> | null, slot: number, source?: "stream" | "rpc") => void>();
   private broadcasts = new Set<string>();
@@ -59,7 +60,9 @@ export class FossaClient {
         const update = JSON.parse(String(event.data));
         if (update.type === "catalog") this.updateCatalog(update.data);
         if (update.type === "chain") { this.chain = update.data ?? undefined; this.chainUntil = Date.now() + (this.chain?.maxAgeMs ?? 0) - 1000; }
-        if (update.type === "wallet" && update.data.wallet === this.account.wallet && update.data.lane === this.account.lane && update.data.slot >= (this.wallet?.slot ?? 0)) { this.wallet = update.data; this.walletAt = Date.now(); }
+        if (update.type === "wallet" && update.data.wallet === this.account.wallet && update.data.lane === this.account.lane && update.data.slot >= (this.wallet?.slot ?? 0)) { this.wallet = update.data; this.walletAt = Date.now(); this.wakeWallet(); }
+        if (update.type === "receipt" && update.commitment === "confirmed") this.receipt(update.data);
+        if (update.type === "resync") void this.refresh().catch(() => {});
         if (update.type === "booking") {
           const info = update.data.data === null ? null : { owner: new PublicKey(update.data.owner), data: Buffer.from(update.data.data, "base64"), executable: false, lamports: 0n, rentEpoch: 0n };
           if (!info && this.wallet) this.wallet.bookings = this.wallet.bookings.filter(item => item.address !== update.address);
@@ -80,8 +83,9 @@ export class FossaClient {
       this.updateCatalog(catalog, version);
       if (wallet.slot >= (this.wallet?.slot ?? 0)) { this.wallet = wallet; this.walletAt = Date.now(); }
       const rows = this.store.pending(this.account.wallet);
-      for (const receipt of history.receipts) { const row = rows.find(row => row.kind === "inference" && row.booking === receipt.booking && row.generation === receipt.generation); if (row) { row.charge = receipt.charge; row.stage = "settled"; this.store.put(row); } }
+      for (const receipt of history.receipts) { const row = rows.find(row => row.kind === "inference" && row.booking === receipt.booking && row.generation === receipt.generation); if (row) { row.charge = receipt.charge; row.stage = "settled"; row.settledAt ??= Date.now(); this.store.put(row); } }
       this.publish({ connected: true, balanceAtomic: (BigInt(wallet.usdcAtomic) + BigInt(wallet.freeAtomic)).toString(), reservedAtomic: rows.filter(row => !terminal.has(row.stage)).reduce((sum, row) => sum + BigInt(row.reserve), 0n).toString(), paidAtomic: rows.reduce((sum, row) => sum + BigInt(row.charge ?? "0"), 0n).toString() });
+      this.wakeWallet();
       if (["settling", "uncertain"].includes(this.status.stage) && rows.some(row => row.id === this.status.requestId && ["settled", "released"].includes(row.stage))) this.publish({ stage: "idle", message: "Payment settled." });
     })().finally(() => { this.refreshing = undefined; });
   }
@@ -92,13 +96,25 @@ export class FossaClient {
     this.catalogVersion++;
     for (const wake of this.catalogWaiters) wake();
   }
+  private wakeWallet() { for (const wake of this.walletWaiters) wake(); }
+  private receipt(value: unknown) {
+    const receipt = value as { owner?: string; provider?: string; booking?: string; generation?: string; charge?: string; slot?: number } | null;
+    if (!receipt || receipt.owner !== this.account.wallet || typeof receipt.charge !== "string" || !/^\d{1,20}$/.test(receipt.charge) || !Number.isSafeInteger(receipt.slot) || receipt.slot! < 0) return;
+    const row = this.store.pending(this.account.wallet).find(row => row.kind === "inference" && row.booking === receipt.booking && row.generation === receipt.generation);
+    if (!row || receipt.slot! < (row.processedSlot ?? 0) || BigInt(receipt.charge) > BigInt(row.reserve) || row.provider && receipt.provider !== row.provider) return;
+    row.charge = receipt.charge; row.stage = "settled"; row.settlementSlot = receipt.slot; row.settledAt ??= Date.now(); this.store.put(row);
+    this.wakeWallet(); this.changed();
+  }
   private waitForCatalog(signal: AbortSignal, deadline: number) {
+    return this.waitForUpdate(this.catalogWaiters, signal, deadline, Math.min(1000, this.cfg.opencode.pollIntervalMs / 4));
+  }
+  private waitForUpdate(waiters: Set<() => void>, signal: AbortSignal, deadline: number, interval: number) {
     signal.throwIfAborted();
     return new Promise<boolean>((resolve, reject) => {
-      const finish = (changed: boolean, error?: unknown) => { clearTimeout(timer); this.catalogWaiters.delete(wake); signal.removeEventListener("abort", abort); if (error !== undefined) reject(error); else resolve(changed); };
+      const finish = (changed: boolean, error?: unknown) => { clearTimeout(timer); waiters.delete(wake); signal.removeEventListener("abort", abort); if (error !== undefined) reject(error); else resolve(changed); };
       const wake = () => finish(true), abort = () => finish(false, signal.reason);
-      const timer = setTimeout(() => finish(false), Math.max(0, Math.min(1000, this.cfg.opencode.pollIntervalMs / 4, deadline - Date.now())));
-      this.catalogWaiters.add(wake); signal.addEventListener("abort", abort, { once: true });
+      const timer = setTimeout(() => finish(false), Math.max(0, Math.min(interval, deadline - Date.now())));
+      waiters.add(wake); signal.addEventListener("abort", abort, { once: true });
     });
   }
   async snapshot(minSlot = 0, forceRpc = false): Promise<WalletState> {
@@ -134,7 +150,7 @@ export class FossaClient {
       const reserve = BigInt(row.reserve), deposit = BigInt(row.deposit ?? row.reserve);
       usdc -= deposit; free += deposit - reserve; lamports -= BigInt(row.feeLamports ?? "0");
     }
-    const occupied = new Set(rows.filter(row => row.kind === "inference" && (!terminal.has(row.stage) || !["failed", "expired"].includes(row.stage) && (row.processedSlot ?? 0) > wallet.slot)).map(row => row.booking));
+    const occupied = new Set(rows.filter(row => row.kind === "inference" && (!terminal.has(row.stage) || !["failed", "expired"].includes(row.stage) && Math.max(row.processedSlot ?? 0, row.settlementSlot ?? 0) > wallet.slot)).map(row => row.booking));
     return { ...wallet, usdcAtomic: String(usdc > 0n ? usdc : 0n), freeAtomic: String(free > 0n ? free : 0n), lamports: String(lamports > 0n ? lamports : 0n), generation: String(generation), bookings: wallet.bookings.filter(booking => !occupied.has(booking.address)) };
   }
   private broadcast(row: Pending) {
@@ -152,7 +168,7 @@ export class FossaClient {
   private submit(row: Pending) {
     this.store.put(row);
     this.progress(row.id, { stage: "broadcasting", signature: row.signature, message: "Broadcasting transaction…" });
-    row.submittedAt = Date.now(); row.stage = "sent"; this.store.put(row);
+    row.submittedAt = Date.now(); row.gapToSubmitMs = row.previousResponseFinishedAt === undefined ? undefined : row.submittedAt - row.previousResponseFinishedAt; row.stage = "sent"; this.store.put(row);
     this.broadcast(row);
     this.progress(row.id, { stage: "confirming", message: "Waiting for booking update…" });
   }
@@ -167,12 +183,15 @@ export class FossaClient {
     });
     const poll = async (): Promise<number> => {
       // allow the indexed booking to arrive before any recovery rpc calls.
-      if (wake) await Bun.sleep(this.cfg.opencode.pollIntervalMs / 2);
+      if (wake) await Bun.sleep(Math.min(500, this.cfg.opencode.pollIntervalMs / 2));
       while (!done) {
         try {
           const [statuses, account] = await Promise.all([
             this.rpc.getSignatureStatuses([row.signature], { searchTransactionHistory: true }),
-            wake && row.kind === "inference" ? this.rpc.getAccountInfoAndContext(new PublicKey(row.booking), "processed") : undefined,
+            wake && row.kind === "inference" ? this.rpc.getAccountInfoAndContext(new PublicKey(row.booking), "processed").then(account => {
+              if (!done && account.value?.owner.equals(new PublicKey(this.cfg.programId)) && account.value.data.length === 368 && account.value.data[148] === 0 && Buffer.from(account.value.data).readBigUInt64LE(152).toString() === row.generation) this.watchers.get(row.booking)?.(account.value, Number(account.context.slot), "rpc");
+              return account;
+            }) : undefined,
           ]);
           const [status] = statuses.value;
           if (done) return 0;
@@ -181,7 +200,7 @@ export class FossaClient {
             this.watchers.get(row.booking)?.(account.value, Number(account.context.slot), "rpc");
             return Number(account.context.slot);
           }
-          if (!wake && status && (!confirmed || status.confirmationStatus === "confirmed" || status.confirmationStatus === "finalized")) return Number(status.slot);
+          if (!wake && status && !status.err && (!confirmed || status.confirmationStatus === "confirmed" || status.confirmationStatus === "finalized")) return Number(status.slot);
           if (!status) {
             const height = await this.rpc.getBlockHeight("finalized");
             if (done) return 0;
@@ -195,7 +214,8 @@ export class FossaClient {
     };
     try {
       const slot = await Promise.race([interrupted, ...(wake && !confirmed ? [wake] : []), poll()]);
-      row.processedMs = Date.now() - (row.submittedAt ?? row.created);
+      if (confirmed) row.confirmationMs = Date.now() - (row.submittedAt ?? row.created);
+      else { row.processedMs ??= Date.now() - (row.submittedAt ?? row.created); row.bookingObservedAt ??= Date.now(); }
       return slot;
     } catch (error) {
       if (!terminal.has(row.stage)) { row.stage = "uncertain"; this.store.put(row); }
@@ -361,9 +381,14 @@ export class FossaClient {
     } catch (error) { this.rakebackMessage = error instanceof Error ? error.message : "Rakeback failed."; throw error; }
     finally { this.raking = false; this.changed(); }
   }
-  async request(callId: string, modelId: string, body: string, session: string, kind: string, signal: AbortSignal) {
+  async request(callId: string, modelId: string, body: string, session: string, kind: string, signal: AbortSignal, timing: { modelRequestAt?: number; transportReceivedAt?: number } = {}) {
     signal.throwIfAborted();
     const startedAt = Date.now();
+    const previousRequest = this.store.pending(this.account.wallet).filter(row => row.kind === "inference" && row.session === session && row.flow === kind && row.id !== callId).at(-1);
+    const previousResponseFinishedAt = previousRequest?.responseFinishedAt;
+    const gap = (timing.modelRequestAt ?? startedAt) - (previousResponseFinishedAt ?? Infinity);
+    const requestTiming = { ...timing, previousRequestId: previousRequest?.id, ...(gap >= 0 ? { previousResponseFinishedAt, requestGapMs: gap } : {}) };
+    let recoveryWaitMs = 0, admissionWaitMs = 0, bookingPoolWaitMs = 0;
     if (kind === "primary") this.publish({ requestId: callId, sessionID: session, model: modelId, provider: undefined, signature: undefined, booking: undefined, stage: "synchronizing", message: "Checking wallet and providers…" });
     if (Buffer.byteLength(body) > this.cfg.opencode.maxRequestBytes) throw new FossaError("REQUEST_TOO_LARGE", "Request exceeds Fossa payload limit.");
     const hash = digest(body);
@@ -376,6 +401,7 @@ export class FossaClient {
       throw new FossaError("SUBMISSION_UNCERTAIN", "Existing booking is unresolved. Use /fossa to recover it.");
     }
     return this.store.exclusive(this.account.wallet, async () => {
+      const walletLockMs = Date.now() - startedAt;
       signal.throwIfAborted();
       const existing = this.store.request(callId, this.account.wallet);
       if (existing) {
@@ -395,7 +421,9 @@ export class FossaClient {
       if (!Array.isArray(parsed.messages) || !Number.isSafeInteger(maxOutput) || !maxOutput || maxOutput < 1 || maxOutput > (model.outputTokens ?? 0) || maxInput > Math.min(model.inputBoundTokens ?? model.contextTokens ?? 0, this.cfg.opencode.maxInputTokens)) throw new FossaError("TOKEN_LIMIT", "Request exceeds model or Fossa token bounds. Reduce context or output limit before retrying.");
       validateBody(parsed, { maxInput, maxOutput, claimEnd: Number.MAX_SAFE_INTEGER }, { model: model.id, speed_tps: 1, context_tokens: model.contextTokens ?? 0, max_input_bound: model.inputBoundTokens ?? model.contextTokens, output_tokens: model.outputTokens ?? 0, tools: model.capabilities?.tools === true, input: model.modalities.input, effort: model.variants?.map(variant => variant.body.reasoning_effort) ?? model.effort });
       if (this.store.pending(this.account.wallet).some(row => ["prepared", "sent", "uncertain"].includes(row.stage))) {
+        const recoveryAt = Date.now();
         await this.reconcile(true);
+        recoveryWaitMs += Date.now() - recoveryAt;
         if (this.store.pending(this.account.wallet).some(row => ["prepared", "sent", "uncertain"].includes(row.stage))) throw new FossaError("RECOVERY_PENDING", "Previous payment is recovering automatically. Try again once its release is confirmed.");
       }
       const estimatedInput = Math.min(maxInput, Math.ceil(Buffer.byteLength(body) / 4)), estimatedOutput = Math.min(maxOutput, 256);
@@ -407,7 +435,7 @@ export class FossaClient {
       const estimate = { input: estimatedInput, cached, output: estimatedOutput, provider: prior?.provider };
       const settings = this.settings(modelId);
       let ranked = rankOffers(eligible(model, settings, maxInput, maxOutput), settings, estimate);
-      const admissionDeadline = Date.now() + this.cfg.opencode.requestTimeoutMs;
+      const admissionAt = Date.now(), admissionDeadline = admissionAt + this.cfg.opencode.requestTimeoutMs;
       let refresh = true;
       while (!ranked.length && settling(model, settings, maxInput, maxOutput) && Date.now() < admissionDeadline) {
         signal.throwIfAborted();
@@ -423,6 +451,7 @@ export class FossaClient {
       signal.throwIfAborted();
       if (this.stopped) throw new FossaError("FOSSA_STOPPED", "Fossa connection closed.");
       this.quote();
+      admissionWaitMs = Date.now() - admissionAt;
       const best = ranked[0];
       const minSpeed = settings.mode === "cheapest" ? settings.minSpeed : Math.max(settings.minSpeed, best?.speed ?? 0);
       const maxSpend = best ? fee(maxInput, best.inputRate) + fee(maxOutput, best.outputRate) + 1n : 0n;
@@ -439,11 +468,16 @@ export class FossaClient {
         for (let attempt = 0; attempt < 2; attempt++) {
           wallet = this.availableWallet();
           let free = wallet.bookings.find(value => value.status === 5);
-          const poolDeadline = Date.now() + this.cfg.opencode.requestTimeoutMs;
+          const poolAt = Date.now(), poolDeadline = poolAt + this.cfg.opencode.requestTimeoutMs;
           while (!free && Date.now() < poolDeadline) {
             signal.throwIfAborted(); this.progress(callId, { stage: "settling", message: "Waiting for a provider to release reusable booking storage…" });
-            await Bun.sleep(this.cfg.opencode.pollIntervalMs / 4); wallet = this.availableWallet(); free = wallet.bookings.find(value => value.status === 5);
+            if (this.stopped) throw new FossaError("FOSSA_STOPPED", "Fossa connection closed.");
+            if (!await this.waitForUpdate(this.walletWaiters, signal, poolDeadline, Math.min(1000, this.cfg.opencode.pollIntervalMs))) await this.refresh();
+            wallet = this.availableWallet(); free = wallet.bookings.find(value => value.status === 5);
           }
+          bookingPoolWaitMs += Date.now() - poolAt;
+          signal.throwIfAborted();
+          if (this.stopped) throw new FossaError("FOSSA_STOPPED", "Fossa connection closed.");
           if (!free) throw new FossaError("BOOKING_POOL_BUSY", "Providers have not released booking storage yet. Open /fossa → Rakeback to recover expired reservations.");
           const remaining = BigInt(wallet.usdcAtomic) + BigInt(wallet.freeAtomic);
           if (remaining < reserve) throw new FossaError("USDC_REQUIRED", `Add ${atomic(reserve - remaining)} USDC to cover this request's maximum reservation.`);
@@ -466,7 +500,7 @@ export class FossaClient {
           if (this.socket?.readyState === WebSocket.OPEN) this.socket.send(JSON.stringify({ watch: free.address }));
           let row: Pending, slot: number, info: AccountInfo<Uint8Array> | null;
           try {
-            row = await this.journal(tx, [owner], { id: callId, wallet: this.account.wallet, model: modelId, bodyHash: hash, cache: { messages: parsed.messages.length, prefix: prefix(parsed.messages.length) }, session, kind: "inference", flow: kind, booking: free.address, generation: generation.toString(), reserve: reserve.toString(), deposit: deposit.toString(), startedAt }, 0, signal);
+            row = await this.journal(tx, [owner], { id: callId, wallet: this.account.wallet, model: modelId, bodyHash: hash, cache: { messages: parsed.messages.length, prefix: prefix(parsed.messages.length) }, session, kind: "inference", flow: kind, booking: free.address, generation: generation.toString(), reserve: reserve.toString(), deposit: deposit.toString(), startedAt, ...requestTiming, walletLockMs, recoveryWaitMs, admissionWaitMs, bookingPoolWaitMs }, 0, signal);
             slot = await this.processed(row, signal, changed);
             row.processedSlot = slot; this.store.put(row);
             this.progress(callId, { stage: "matched", message: "Transaction confirmed · matching provider…" });
@@ -536,7 +570,8 @@ export class FossaClient {
   dispatched(id: string, at: number) {
     const row = this.store.request(id, this.account.wallet);
     if (!row || row.submittedAt === undefined) return;
-    row.dispatchStarted = true;
+    row.dispatchStarted = true; row.providerDispatchedAt ??= at;
+    row.gapToProviderMs ??= row.previousResponseFinishedAt === undefined ? undefined : at - row.previousResponseFinishedAt;
     if (row.stage === "reserved") row.stage = "inference";
     row.providerRequestMs ??= at - (row.startedAt ?? row.created); row.sendToProviderMs ??= at - row.submittedAt;
     this.store.put(row);
@@ -544,6 +579,7 @@ export class FossaClient {
   response(request: Request, response: Response) {
     const id = request.headers.get("x-fossa-call-id"), row = id ? this.store.request(id, this.account.wallet) : undefined;
     if (!row) return response;
+    row.responseHeadersAt ??= Date.now();
     if (row.dispatchStarted !== true) { row.dispatchStarted = true; this.store.put(row); }
     if (!response.ok) { row.stage = "uncertain"; this.store.put(row); this.progress(row.id, { stage: "error", message: `Provider returned ${response.status}. Payment is recovering automatically.` }); void this.recoverPending(); return response; }
     if (!response.body) { row.stage = "uncertain"; this.store.put(row); this.progress(row.id, { stage: "uncertain", message: "Empty provider response · reconciling payment…" }); void this.recoverPending(); return response; }
@@ -551,11 +587,18 @@ export class FossaClient {
     const parseLine = (line: string) => {
       if (!line.startsWith("data:")) return;
       const data = line.slice(5).trim();
-      if (data === "[DONE]") { completed = true; return; }
+      if (data === "[DONE]") { completed = true; row.responseDoneAt ??= Date.now(); return; }
       try { const event = JSON.parse(data); if (event.error) failed = true; const usage = event.usage; if (usage && Number.isSafeInteger(usage.prompt_tokens) && usage.prompt_tokens >= 0 && Number.isSafeInteger(usage.completion_tokens) && usage.completion_tokens >= 0) row.usage = { input: usage.prompt_tokens, output: usage.completion_tokens, cached: Math.min(usage.prompt_tokens, Math.max(0, Number.isSafeInteger(usage.prompt_tokens_details?.cached_tokens) ? usage.prompt_tokens_details.cached_tokens : 0)) }; } catch { /* keep upstream bytes intact */ }
     };
     let abort = () => {};
-    const finish = () => { if (finished) return; finished = true; request.signal.removeEventListener("abort", abort); completed &&= !failed; row.stage = completed ? "settling" : "uncertain"; this.store.put(row); this.progress(row.id, { stage: completed ? "settling" : "uncertain", message: completed ? "Inference complete · settling payment…" : "Stream interrupted · reconciling payment…" }); if (completed) void this.refresh().catch(() => {}); else void this.recoverPending(); };
+    const finish = () => {
+      if (finished) return;
+      finished = true; request.signal.removeEventListener("abort", abort); completed &&= !failed;
+      row.responseFinishedAt ??= Date.now(); row.responseCompleted = completed; row.stage = completed ? "settling" : "uncertain"; this.store.put(row);
+      const settled = row.stage === "settled";
+      this.progress(row.id, { stage: settled ? "idle" : completed ? "settling" : "uncertain", message: settled ? "Payment settled." : completed ? "Inference complete · settling payment…" : "Stream interrupted · reconciling payment…" });
+      if (completed || settled) void this.refresh().catch(() => {}); else void this.recoverPending();
+    };
     abort = () => { failed = true; finish(); void this.cancel(row.id).catch(() => {}); void reader.cancel(request.signal.reason).catch(() => {}); };
     request.signal.addEventListener("abort", abort, { once: true });
     if (request.signal.aborted) abort();
@@ -564,7 +607,7 @@ export class FossaClient {
         try {
           const result = await reader.read();
           if (result.done) { pending += decoder.decode(); if (pending.trim()) parseLine(pending.trim()); finish(); reader.releaseLock(); controller.close(); return; }
-          if (!started) { started = true; this.progress(row.id, { stage: "streaming", message: `${this.status.provider ?? "Provider"} generating…` }); }
+          if (!started) { started = true; row.firstByteAt ??= Date.now(); this.progress(row.id, { stage: "streaming", message: `${this.status.provider ?? "Provider"} generating…` }); }
           if (response.headers.get("content-type")?.includes("text/event-stream")) {
             pending += decoder.decode(result.value, { stream: true });
             let end: number;
@@ -582,6 +625,6 @@ export class FossaClient {
     return new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
   }
   failed(id: string) { const row = this.store.request(id, this.account.wallet); if (row && ["prepared", "sent", "matched", "inference"].includes(row.stage)) { row.stage = "uncertain"; this.store.put(row); void this.recoverPending(); } }
-  stop() { this.stopped = true; clearTimeout(this.retry); clearInterval(this.timer); clearInterval(this.rakebackTimer); this.socket?.close(); for (const wake of this.catalogWaiters) wake(); }
+  stop() { this.stopped = true; clearTimeout(this.retry); clearInterval(this.timer); clearInterval(this.rakebackTimer); this.socket?.close(); for (const wake of this.catalogWaiters) wake(); this.wakeWallet(); }
   async drain() { this.stop(); await Promise.allSettled([this.refreshing, this.recovering, this.rakebackRunning, ...this.cancellations.values()]); }
 }
