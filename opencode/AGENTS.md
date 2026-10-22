@@ -2,7 +2,7 @@
 
 follow [shared rules](../AGENTS.md). current entrypoints and commands are defined in `package.json`.
 
-canonical client repository: public `usefossa/client`, plugin under `opencode/`. install with `bun install && bun run install:local`; default api `https://api.fossa.ag`, overridden through installer `FOSSA_API_URL` or plugin `options.apiUrl`. client must not read backend `config.toml`. installer replaces previous fossa source entries while preserving unrelated opencode configuration and wallet data.
+install with `bun install && bun run install:local`; default api `https://api.fossa.ag`, overridden through installer `FOSSA_API_URL` or plugin `options.apiUrl`. client must not load service-side configuration. installer replaces previous fossa source entries while preserving unrelated opencode configuration and wallet data.
 
 ## native experience
 
@@ -15,10 +15,10 @@ canonical client repository: public `usefossa/client`, plugin under `opencode/`.
 - keep signing keys encrypted on user's computer in every connection flow. manual key import needs no website; quick connect uses existing fossa site. passphrase protection is optional in settings.
 - consume verified per-model capabilities, context/output limits, and modalities. default effort to model maximum unless user chooses otherwise; avoid arbitrary shared output caps.
 - warm validated data and signing state before inference; sign/broadcast locally and act on actual booking readiness. benchmark fast, reliable fallbacks instead of fixed waits. transfer confirmation policies remain separate.
-- `src/protocol.ts` is shared with provider validation; coordinate changes with the maintained provider implementation. preserve compatibility with active program/account layouts.
+- changes to `src/protocol.ts` must preserve provider validation compatibility and active program/account layouts.
 
 ## verification
 
 when shared workflow authorizes checks, use relevant `bun test` coverage and `bun run typecheck`; target affected server/tui behavior and pinned opencode compatibility.
 
-external integration checks are opt-in: `FOSSA_PROVIDER_ROOT` selects provider source for client/provider fixture tests; `FOSSA_TEST_API_URL` and `FOSSA_TEST_ORIGIN` select a backend for auth checks; `FOSSA_TEST_BASE_URL` selects website for browser checks. ordinary tests need no backend configuration, live service or sibling checkout. never point auth integration tests at production without explicit authorization.
+external integration checks are opt-in: `FOSSA_PROVIDER_ROOT` selects an explicitly supplied provider fixture checkout; `FOSSA_TEST_API_URL` and `FOSSA_TEST_ORIGIN` select an api and origin for auth checks; `FOSSA_TEST_BASE_URL` selects website for browser checks. ordinary tests must be self-contained and require no live services. never point auth integration tests at production without explicit authorization.
