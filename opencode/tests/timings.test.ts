@@ -5,6 +5,16 @@ import { join } from "node:path";
 import { Store, type Pending } from "../src/store";
 import { FossaClient } from "../src/client";
 
+test("request timing lookup isolates wallet, session and flow and skips current request", () => {
+  const directory = mkdtempSync(join(tmpdir(), "fossa-previous-")), store = new Store(directory);
+  try {
+    const row = { wallet: "owner", kind: "inference", session: "session", flow: "primary", stage: "settled", created: 1 } as Pending;
+    for (const patch of [{ id: "first" }, { id: "latest" }, { id: "other-session", session: "other" }, { id: "other-flow", flow: "title" }, { id: "other-wallet", wallet: "other" }, { id: "withdrawal", kind: "withdrawal" }, { id: "current" }]) store.put({ ...row, ...patch });
+    expect(store.previousInference("current", "owner", "session", "primary")?.id).toBe("latest");
+    expect(store.previousInference("current", "owner", "missing", "primary")).toBeUndefined();
+  } finally { store.close(); rmSync(directory, { recursive: true, force: true }); }
+});
+
 test("confirmed receipts validate bindings and cannot be overwritten by stream completion", async () => {
   const directory = mkdtempSync(join(tmpdir(), "fossa-receipt-")), store = new Store(directory);
   const client = new FossaClient(store, { walletId: "test", wallet: "owner", lane: "lane", apiUrl: "http://127.0.0.1", name: "Test", access: "test", refresh: "test", expires: 0 }, () => {});

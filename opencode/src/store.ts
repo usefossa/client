@@ -119,6 +119,10 @@ export class Store {
   rakebackRan(id: string) { this.setRakeback(id, {}); this.db.query("UPDATE rakeback_settings SET last_run=? WHERE wallet=?").run(Date.now(), id); }
   pending(wallet?: string) { return (wallet ? this.db.query("SELECT state FROM pending WHERE wallet=? ORDER BY created").all(wallet) : this.db.query("SELECT state FROM pending ORDER BY created").all()).map(row => JSON.parse((row as { state: string }).state) as Pending); }
   request(id: string, wallet: string) { const row = this.db.query("SELECT state FROM pending WHERE id=? AND wallet=?").get(id, wallet) as { state: string } | null; return row ? JSON.parse(row.state) as Pending : undefined; }
+  previousInference(id: string, wallet: string, session: string, flow: string) {
+    const row = this.db.query("SELECT state FROM pending WHERE wallet=? AND id<>? AND json_extract(state,'$.kind')='inference' AND json_extract(state,'$.session')=? AND json_extract(state,'$.flow')=? ORDER BY created DESC,rowid DESC LIMIT 1").get(wallet, id, session, flow) as { state: string } | null;
+    return row ? JSON.parse(row.state) as Pending : undefined;
+  }
   put(value: Pending) {
     const previous = this.request(value.id, value.wallet);
     if (previous?.settlementSlot !== undefined && previous.booking === value.booking && previous.generation === value.generation

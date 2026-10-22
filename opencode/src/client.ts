@@ -384,7 +384,7 @@ export class FossaClient {
   async request(callId: string, modelId: string, body: string, session: string, kind: string, signal: AbortSignal, timing: { modelRequestAt?: number; transportReceivedAt?: number } = {}) {
     signal.throwIfAborted();
     const startedAt = Date.now();
-    const previousRequest = this.store.pending(this.account.wallet).filter(row => row.kind === "inference" && row.session === session && row.flow === kind && row.id !== callId).at(-1);
+    const previousRequest = this.store.previousInference(callId, this.account.wallet, session, kind);
     const previousResponseFinishedAt = previousRequest?.responseFinishedAt;
     const gap = (timing.modelRequestAt ?? startedAt) - (previousResponseFinishedAt ?? Infinity);
     const requestTiming = { ...timing, previousRequestId: previousRequest?.id, ...(gap >= 0 ? { previousResponseFinishedAt, requestGapMs: gap } : {}) };
