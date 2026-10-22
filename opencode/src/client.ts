@@ -11,7 +11,7 @@ import { recoverable, rakebackDollars } from "./rakeback";
 import { FossaError, type Account, type Catalog, type Chain, type MarketModel, type Offer, type PublicConfig, type RakebackFunds, type RakebackState, type Settings, type Status, type WalletState } from "./types";
 
 export { inputBound } from "./protocol";
-import { eligible, fee, priceFields, rankOffers, unavailable } from "./routing";
+import { eligible, fee, priceFields, rankOffers, settling, unavailable } from "./routing";
 export { eligible, fee } from "./routing";
 const atomic = (value: bigint, decimals = 6) => `${value / 10n ** BigInt(decimals)}.${(value % 10n ** BigInt(decimals)).toString().padStart(decimals, "0")}`;
 const digest = (body: string) => createHash("sha256").update(body).digest("hex");
@@ -26,6 +26,8 @@ export class FossaClient {
   status: Status = { stage: "connecting", message: "Connecting to Fossa…", paidAtomic: "0", connected: false };
   private rpc!: Connection; private socket?: WebSocket; private retry?: ReturnType<typeof setTimeout>; private timer?: ReturnType<typeof setInterval>;
   private chainUntil = 0; private catalogAt = 0; private walletAt = 0; private stopped = false; private refreshing?: Promise<void>;
+  private catalogWaiters = new Set<() => void>();
+  private catalogVersion = 0;
   private watchers = new Map<string, (info: AccountInfo<Uint8Array> | null, slot: number, source?: "stream" | "rpc") => void>();
   private broadcasts = new Set<string>();
   private rakebackTimer?: ReturnType<typeof setInterval>;
@@ -55,7 +57,7 @@ export class FossaClient {
     socket.onmessage = event => {
       try {
         const update = JSON.parse(String(event.data));
-        if (update.type === "catalog") { this.catalog = update.data; this.catalogAt = Date.now(); }
+        if (update.type === "catalog") this.updateCatalog(update.data);
         if (update.type === "chain") { this.chain = update.data ?? undefined; this.chainUntil = Date.now() + (this.chain?.maxAgeMs ?? 0) - 1000; }
         if (update.type === "wallet" && update.data.wallet === this.account.wallet && update.data.lane === this.account.lane && update.data.slot >= (this.wallet?.slot ?? 0)) { this.wallet = update.data; this.walletAt = Date.now(); }
         if (update.type === "booking") {
@@ -72,15 +74,32 @@ export class FossaClient {
   refresh(): Promise<void> {
     if (this.stopped) return Promise.resolve();
     return this.refreshing ??= (async () => {
+      const version = this.catalogVersion;
       const [catalog, wallet, history] = await Promise.all([api<Catalog>(this.account.apiUrl, "/market/catalog"), this.snapshot(), api<{ receipts: { booking: string; generation: string; charge: string }[] }>(this.account.apiUrl, "/opencode/receipts", { token: this.account.access })]);
       if (catalog.programId !== this.cfg.programId || catalog.market !== this.cfg.market) throw new FossaError("MARKET_CHANGED", "Fossa protocol configuration changed. Reconnect before signing.");
-      this.catalog = catalog; this.catalogAt = Date.now();
+      this.updateCatalog(catalog, version);
       if (wallet.slot >= (this.wallet?.slot ?? 0)) { this.wallet = wallet; this.walletAt = Date.now(); }
       const rows = this.store.pending(this.account.wallet);
       for (const receipt of history.receipts) { const row = rows.find(row => row.kind === "inference" && row.booking === receipt.booking && row.generation === receipt.generation); if (row) { row.charge = receipt.charge; row.stage = "settled"; this.store.put(row); } }
       this.publish({ connected: true, balanceAtomic: (BigInt(wallet.usdcAtomic) + BigInt(wallet.freeAtomic)).toString(), reservedAtomic: rows.filter(row => !terminal.has(row.stage)).reduce((sum, row) => sum + BigInt(row.reserve), 0n).toString(), paidAtomic: rows.reduce((sum, row) => sum + BigInt(row.charge ?? "0"), 0n).toString() });
       if (["settling", "uncertain"].includes(this.status.stage) && rows.some(row => row.id === this.status.requestId && ["settled", "released"].includes(row.stage))) this.publish({ stage: "idle", message: "Payment settled." });
     })().finally(() => { this.refreshing = undefined; });
+  }
+  private updateCatalog(catalog: Catalog, version = this.catalogVersion) {
+    if (catalog.programId !== this.cfg.programId || catalog.market !== this.cfg.market) throw new FossaError("MARKET_CHANGED", "Fossa protocol configuration changed. Reconnect before signing.");
+    if (this.catalog && (catalog.slot < this.catalog.slot || version !== this.catalogVersion && catalog.slot === this.catalog.slot)) return;
+    this.catalog = catalog; this.catalogAt = Date.now();
+    this.catalogVersion++;
+    for (const wake of this.catalogWaiters) wake();
+  }
+  private waitForCatalog(signal: AbortSignal, deadline: number) {
+    signal.throwIfAborted();
+    return new Promise<boolean>((resolve, reject) => {
+      const finish = (changed: boolean, error?: unknown) => { clearTimeout(timer); this.catalogWaiters.delete(wake); signal.removeEventListener("abort", abort); if (error !== undefined) reject(error); else resolve(changed); };
+      const wake = () => finish(true), abort = () => finish(false, signal.reason);
+      const timer = setTimeout(() => finish(false), Math.max(0, Math.min(1000, this.cfg.opencode.pollIntervalMs / 4, deadline - Date.now())));
+      this.catalogWaiters.add(wake); signal.addEventListener("abort", abort, { once: true });
+    });
   }
   async snapshot(minSlot = 0, forceRpc = false): Promise<WalletState> {
     const pool = new Set([...(this.wallet?.bookings ?? []).map(item => item.address), ...Object.keys(this.store.unlocked(this.account.walletId) ? this.store.secrets(this.account.walletId).bookings : {})]);
@@ -369,7 +388,7 @@ export class FossaClient {
       if (this.socket?.readyState !== WebSocket.OPEN || Date.now() - this.walletAt > this.cfg.opencode.catalogMaxAgeMs) throw new FossaError("WALLET_SYNCING", "Live wallet data is synchronizing. Try again shortly.");
       this.quote();
       if (!this.catalog?.ready || Date.now() - this.catalogAt > this.cfg.opencode.catalogMaxAgeMs) throw new FossaError("CATALOG_STALE", "Fossa catalog is synchronizing. No payment submitted.");
-      const model = this.catalog.models.find(model => model.id === modelId);
+      let model = this.catalog.models.find(model => model.id === modelId);
       if (!model) throw new FossaError("MODEL_UNAVAILABLE", "Selected Fossa model is unavailable.");
       const parsed = JSON.parse(body) as { messages: unknown[]; tools?: unknown[]; max_tokens?: number; max_completion_tokens?: number };
       const maxInput = inputBound(parsed, model.contextTokens), maxOutput = parsed.max_tokens ?? parsed.max_completion_tokens;
@@ -386,7 +405,24 @@ export class FossaClient {
       const continued = prior && parsed.messages.slice(prior.cache!.messages).some(message => message && typeof message === "object" && "role" in message && message.role === "assistant");
       const cached = prior ? Math.min(estimatedInput, prior.usage!.input + (continued ? prior.usage!.output : 0), Math.ceil(Buffer.byteLength(JSON.stringify(parsed.messages.slice(0, Math.max(prior.cache!.messages, parsed.messages.length - 1)))) / 4)) : 0;
       const estimate = { input: estimatedInput, cached, output: estimatedOutput, provider: prior?.provider };
-      const settings = this.settings(modelId), ranked = rankOffers(eligible(model, settings, maxInput, maxOutput), settings, estimate);
+      const settings = this.settings(modelId);
+      let ranked = rankOffers(eligible(model, settings, maxInput, maxOutput), settings, estimate);
+      const admissionDeadline = Date.now() + this.cfg.opencode.requestTimeoutMs;
+      let refresh = true;
+      while (!ranked.length && settling(model, settings, maxInput, maxOutput) && Date.now() < admissionDeadline) {
+        signal.throwIfAborted();
+        if (this.stopped) throw new FossaError("FOSSA_STOPPED", "Fossa connection closed.");
+        this.progress(callId, { stage: "settling", message: "Waiting for provider settlement…" });
+        if (refresh) { const version = this.catalogVersion; this.updateCatalog(await api<Catalog>(this.account.apiUrl, "/market/catalog", { signal }), version); }
+        model = this.catalog.models.find(value => value.id === modelId);
+        if (!model) throw new FossaError("MODEL_UNAVAILABLE", "Selected Fossa model is unavailable.");
+        if (maxInput > Math.min(model.inputBoundTokens ?? model.contextTokens ?? 0, this.cfg.opencode.maxInputTokens) || maxOutput > (model.outputTokens ?? 0)) throw new FossaError("TOKEN_LIMIT", "Request exceeds updated model token bounds.");
+        ranked = rankOffers(eligible(model, settings, maxInput, maxOutput), settings, estimate);
+        if (!ranked.length && settling(model, settings, maxInput, maxOutput)) refresh = !await this.waitForCatalog(signal, admissionDeadline);
+      }
+      signal.throwIfAborted();
+      if (this.stopped) throw new FossaError("FOSSA_STOPPED", "Fossa connection closed.");
+      this.quote();
       const best = ranked[0];
       const minSpeed = settings.mode === "cheapest" ? settings.minSpeed : Math.max(settings.minSpeed, best?.speed ?? 0);
       const maxSpend = best ? fee(maxInput, best.inputRate) + fee(maxOutput, best.outputRate) + 1n : 0n;
@@ -546,6 +582,6 @@ export class FossaClient {
     return new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
   }
   failed(id: string) { const row = this.store.request(id, this.account.wallet); if (row && ["prepared", "sent", "matched", "inference"].includes(row.stage)) { row.stage = "uncertain"; this.store.put(row); void this.recoverPending(); } }
-  stop() { this.stopped = true; clearTimeout(this.retry); clearInterval(this.timer); clearInterval(this.rakebackTimer); this.socket?.close(); }
+  stop() { this.stopped = true; clearTimeout(this.retry); clearInterval(this.timer); clearInterval(this.rakebackTimer); this.socket?.close(); for (const wake of this.catalogWaiters) wake(); }
   async drain() { this.stop(); await Promise.allSettled([this.refreshing, this.recovering, this.rakebackRunning, ...this.cancellations.values()]); }
 }

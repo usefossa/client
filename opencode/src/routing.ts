@@ -35,6 +35,14 @@ export function eligible(model: MarketModel, settings: Settings, input: number, 
   });
 }
 
+export function settling(model: MarketModel, settings: Settings, input: number, output: number) {
+  return model.offers.some(offer => {
+    if (!matches(offer, settings) || !offer.activeBookings) return false;
+    const reserve = fee(input, offer.inputRate) + fee(output, offer.outputRate) + 1n;
+    return BigInt(offer.fundedBond) >= reserve + (reserve + 99n) / 100n;
+  });
+}
+
 export function unavailable(model: MarketModel, settings: Settings, input: number, output: number) {
   const offers = model.offers.filter(offer => matches(offer, settings)).map(offer => ({ provider: offer.provider.name, fundedBond: offer.fundedBond, exposure: offer.exposure, activeBookings: offer.activeBookings, capacity: offer.capacity, reserve: (fee(input, offer.inputRate) + fee(output, offer.outputRate) + 1n).toString() }));
   const message = !offers.length ? "No provider matches this model’s price, speed, and data retention filters."

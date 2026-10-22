@@ -23,7 +23,7 @@ async function fixture(customError = 2) {
   const bookData = Buffer.alloc(368); bookData.write("BOOK0V20"); Buffer.from(owner.publicKey.toBytes()).copy(bookData, 8); Buffer.from(market.toBytes()).copy(bookData, 72); Buffer.from(lane.publicKey.toBytes()).copy(bookData, 192); Buffer.from(owner.publicKey.toBytes()).copy(bookData, 256); bookData[148] = 5;
   const tokenData = Buffer.alloc(165); Buffer.from(mint.toBytes()).copy(tokenData); Buffer.from(owner.publicKey.toBytes()).copy(tokenData, 32); tokenData.writeBigUInt64LE(10_000_000n, 64);
   const modelData = Buffer.alloc(144); modelData.write("MODELV20"); Buffer.from(market.toBytes()).copy(modelData, 8);
-  let signature = "", submitted = 0, lostFirst = false, hideStatus = false;
+  let signature = "", submitted = 0, lostFirst = false, hideStatus = false, catalogReads = 0;
   const confirmedSignatures = new Set<string>();
   const deleted = (await Keypair.generate()).publicKey.toString(), failures = new Set<string>();
   type SocketData = { subscribed: boolean; live?: boolean; watch?: string };
@@ -51,12 +51,12 @@ async function fixture(customError = 2) {
     if (url.pathname === "/rpc" && request.method === "GET" && server.upgrade(request, { data: { subscribed: false } })) return;
     if (url.pathname === "/v1/opencode/live" && server.upgrade(request, { data: { subscribed: false, live: true } })) return;
     if (url.pathname === "/v1/config") return json(cfg);
-    if (url.pathname === "/v1/market/catalog") return json(catalog);
+    if (url.pathname === "/v1/market/catalog") { catalogReads++; return json(catalog); }
     if (url.pathname === "/v1/opencode/receipts") return json({ receipts: bookData[148] === 5 ? store.pending(owner.publicKey.toString()).filter(row => row.generation === bookData.readBigUInt64LE(152).toString()).map(row => ({ booking: row.booking, generation: row.generation, charge: "0" })) : [] });
     if (url.pathname === "/upstream/chat/completions") {
       const body = await request.json() as { model: string };
       const chunk = { id: "fixture", object: "chat.completion.chunk", created: 1, model: body.model, choices: [{ index: 0, delta: { content: "Hello" }, finish_reason: "stop" }], usage: { prompt_tokens: 20, completion_tokens: 8, prompt_tokens_details: { cached_tokens: 0 }, total_tokens: 28 } };
-      return new Response(`data: ${JSON.stringify(chunk)}\n\ndata: [DONE]\n\n`, { headers: { "content-type": "text/event-stream" } });
+      return new Response(`data: ${JSON.stringify(chunk)}\n\ndata: ${JSON.stringify({ ...chunk, choices: [] })}\n\ndata: [DONE]\n\n`, { headers: { "content-type": "text/event-stream" } });
     }
     if (url.pathname !== "/rpc") return new Response("Not found", { status: 404 });
     const body = await request.json() as { id: unknown; method: string; params: any[] }; let result: unknown;
@@ -106,11 +106,80 @@ async function fixture(customError = 2) {
   for (let attempt = 0; attempt < 100 && !client["chain"]; attempt++) await Bun.sleep(5);
   expect(client["chain"]).toBeDefined();
   return { client, store, account, provider, owner, bookData, tokenData, cfg, catalog,
+    catalogReads: () => catalogReads,
+    publishCatalog: () => { for (const socket of sockets) if (socket.data.live) socket.send(JSON.stringify({ type: "catalog", data: catalog })); },
     addBooking: async () => { const address = (await Keypair.generate()).publicKey.toString(), data = Buffer.from(bookData); data[148] = 5; data.writeBigUInt64LE(0n, 152); records.set(address, { data, owner: program }); client.wallet!.bookings.push({ address, status: 5, generation: "0", rentPayer: owner.publicKey.toString() }); return address; },
     staleBooking: () => { client.wallet!.bookings.unshift({ address: deleted, status: 5, generation: "0", rentPayer: owner.publicKey.toString() }); },
     closeBooking: () => { for (const socket of sockets) if (socket.data.live) socket.send(JSON.stringify({ type: "booking", address: booking.publicKey.toString(), data: { owner: null, data: null, slot: 101, version: 1 } })); },
     submissions: () => submitted, hideStatus: () => { hideStatus = true; }, loseResponse: () => { lostFirst = true; }, close: async () => { client.stop(); await providerServer.close(); await Bun.sleep(600); store.close(); server.stop(true); owner.secretKey.fill(0); provider.secretKey.fill(0); rmSync(directory, { recursive: true, force: true }); } };
 }
+
+for (const streamed of [true, false]) providerTest(`settlement admission resumes from ${streamed ? "live catalog" : "HTTP fallback"} without another payment`, async () => {
+  const f = await fixture(), model = f.catalog.models[0], offer = model.offers[0];
+  const body = JSON.stringify({ model: model.id, messages: [{ role: "user", content: "Hello" }], max_tokens: 128 });
+  Object.assign(offer, { fundedBond: "1000", exposure: "900", activeBookings: 1 });
+  await f.client.refresh();
+  try {
+    const pending = f.client.request("settlement", model.id, body, "session", "primary", new AbortController().signal);
+    const deadline = Date.now() + 1000;
+    while (!f.client["catalogWaiters"].size && Date.now() < deadline) await Bun.sleep(1);
+    expect(f.client["catalogWaiters"].size).toBe(1);
+    expect(f.submissions()).toBe(0); expect(f.store.pending(f.account.wallet)).toHaveLength(0);
+    Object.assign(offer, { exposure: "100", activeBookings: 0 }); f.catalog.slot++;
+    if (streamed) f.publishCatalog();
+    expect((await pending).url).toBe(offer.provider.endpoint!);
+    expect(f.submissions()).toBe(1); expect(f.store.pending(f.account.wallet)).toHaveLength(1);
+    expect(f.client["catalogWaiters"].size).toBe(0);
+  } finally { await f.close(); }
+});
+
+for (const action of ["abort", "stop", "timeout"] as const) providerTest(`settlement admission ${action} leaves no signed or pending payment`, async () => {
+  const f = await fixture(), model = f.catalog.models[0], controller = new AbortController();
+  Object.assign(model.offers[0], { fundedBond: "1000", exposure: "900", activeBookings: 1 });
+  if (action === "timeout") f.cfg.opencode.requestTimeoutMs = f.client.cfg.opencode.requestTimeoutMs = 50;
+  await f.client.refresh();
+  try {
+    const pending = f.client.request(action, model.id, JSON.stringify({ model: model.id, messages: [{ role: "user", content: "Hello" }], max_tokens: 128 }), "session", "primary", controller.signal);
+    const result = pending.then(() => null, error => error);
+    const deadline = Date.now() + 1000;
+    while (!f.client["catalogWaiters"].size && Date.now() < deadline) await Bun.sleep(1);
+    if (action === "abort") controller.abort(new Error("fixture cancelled"));
+    if (action === "stop") f.client.stop();
+    expect((await result)?.message).toContain(action === "abort" ? "fixture cancelled" : action === "stop" ? "connection closed" : "collateral");
+    expect(f.submissions()).toBe(0); expect(f.store.pending(f.account.wallet)).toHaveLength(0);
+    expect(f.client["catalogWaiters"].size).toBe(0);
+  } finally { await f.close(); }
+});
+
+providerTest("funded admission adds no catalog read and permanent shortfall fails without waiting", async () => {
+  const f = await fixture(), model = f.catalog.models[0], body = JSON.stringify({ model: model.id, messages: [{ role: "user", content: "Hello" }], max_tokens: 128 });
+  try {
+    Object.assign(model.offers[0], { fundedBond: "10", exposure: "0", activeBookings: 1 });
+    await f.client.refresh(); const before = f.catalogReads();
+    await expect(f.client.request("shortfall", model.id, body, "session", "primary", new AbortController().signal)).rejects.toThrow("more provider collateral");
+    expect(f.catalogReads()).toBe(before); expect(f.submissions()).toBe(0);
+    Object.assign(model.offers[0], { fundedBond: "100000000", activeBookings: 0 });
+    await f.client.refresh(); const funded = f.catalogReads();
+    await f.client.request("funded", model.id, body, "session", "primary", new AbortController().signal);
+    await f.client.refresh();
+    expect(f.catalogReads()).toBe(funded + 1); expect(f.submissions()).toBe(1);
+  } finally { await f.close(); }
+});
+
+providerTest("older HTTP catalog cannot replace newer live settlement state within the same slot", async () => {
+  const f = await fixture();
+  try {
+    const previous = structuredClone(f.client.catalog!), version = f.client["catalogVersion"];
+    previous.models[0].offers[0].exposure = "900";
+    const settled = structuredClone(previous); settled.models[0].offers[0].exposure = "100";
+    f.client["updateCatalog"](settled);
+    f.client["updateCatalog"](previous, version);
+    expect(f.client.catalog!.models[0].offers[0].exposure).toBe("100");
+    previous.slot--;
+    f.client["updateCatalog"](previous);
+    expect(f.client.catalog!.models[0].offers[0].exposure).toBe("100");
+  } finally { await f.close(); }
+});
 
 for (const legacy of [false, true]) providerTest(`confirmed undispatched ${legacy ? "legacy" : "journaled"} reservation preserves funds and allows another chat`, async () => {
   const f = await fixture(), body = JSON.stringify({ model: "fixture/coder", messages: [{ role: "user", content: "Hello" }], max_tokens: 128 });
