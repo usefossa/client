@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { Context } from "@opencode/plugin/tui/context";
-import { RGBA, type Renderable, type BoxRenderable } from "@opentui/core";
+import { RGBA, InputRenderable, type Renderable, type BoxRenderable } from "@opentui/core";
 import { testRender, useRenderer } from "@opentui/solid";
 import { createSignal } from "solid-js";
 import { jsx, type JSX } from "@opentui/solid/jsx-runtime";
@@ -42,5 +42,15 @@ test("packaged dialog keeps navigation, page updates, search and prompts reactiv
     const prompt = dialog.prompt({ title: "API endpoint", value: "https://example.com" });
     expect(await frame()).toContain("API endpoint"); expect(await frame()).toContain("https://example.com");
     await t.mockInput.typeText("/v1"); run("submit"); expect(await prompt).toBe("https://example.com/v1");
+    const secret = dialog.prompt({ title: "Unlock wallet", password: true });
+    await frame(); await t.mockInput.typeText("secret");
+    const findInput = (node: Renderable): InputRenderable | undefined => node instanceof InputRenderable ? node : node.getChildren().map(findInput).find(Boolean);
+    const input = findInput(t.renderer.root)!;
+    expect(await frame()).toContain("******"); expect(input.value).toBe("******"); expect(await frame()).not.toContain("secret");
+    input.cursorOffset = 3; input.insertText("🌏é"); input.deleteCharBackward();
+    expect(input.value).toBe("*******"); run("submit"); expect(await secret).toBe("sec🌏ret");
+    expect(input.value).toBe(""); expect(await frame()).not.toContain("secret");
+    const dismissed = dialog.prompt({ title: "Password", password: true }); await frame(); await t.mockInput.typeText("discard");
+    dialog.close(); expect(await dismissed).toBeUndefined();
   } finally { dialog.close(); await t.dispose(); }
 });

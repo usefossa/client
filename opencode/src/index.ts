@@ -1,5 +1,5 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { bookingPending, providerError } from "./provider-response";
+import { bookingPending, readProviderFailure } from "./provider-response";
 import { Credential, Integration, Model, Plugin, Provider } from "@opencode/plugin";
 import type { RpcCallContext } from "@opencode/plugin/promise/rpc";
 import { generate } from "random-words";
@@ -40,7 +40,7 @@ export default Plugin.define({
     let apiUrl = safeUrl(await ctx.storage.get("apiUrl") ?? ctx.options.apiUrl ?? DEFAULT_API_URL), controller = new AbortController();
     let cfg: PublicConfig | undefined, catalog: Catalog | undefined, client: FossaClient | undefined, closing = false;
     let transport: Bun.Server<undefined> | undefined, problem: FossaError | undefined;
-    let refreshRunning: Promise<void> | undefined, inventoryHash = "", inventoryCatalog: Catalog | undefined, lastStatus = "", catalogAt = 0;
+    let refreshRunning: Promise<void> | undefined, inventoryHash = "", capabilitiesHash = "", inventoryCatalog: Catalog | undefined, lastStatus = "", catalogAt = 0;
     let switching = false, endpointChange: Promise<{ apiUrl: string; defaultApiUrl: string }> | undefined;
     let timer: ReturnType<typeof setTimeout> | undefined, failures = 0;
     let rpc: Awaited<ReturnType<typeof ctx.rpc.register<typeof Fossa>>>;
@@ -48,7 +48,7 @@ export default Plugin.define({
     const interfaces = new Set<string>();
     const status = (): Status => {
       const value: Status = problem || !cfg ? { ...client?.status, stage: problem && !["FOSSA_OFFLINE", "FOSSA_TIMEOUT"].includes(problem.code) ? "error" : "connecting", message: problem ? `${problem.message} Retrying automatically.` : "Connecting to Fossa backend…", paidAtomic: client?.status.paidAtomic ?? "0", connected: false } : client?.status ?? { stage: "connecting", message: "Connect a Fossa wallet with /connect.", paidAtomic: "0", connected: false };
-      return { ...value, apiUrl, ...(cfg ? { siteUrl: cfg.opencode.siteUrl } : {}), security: client ? store.security(client.account.walletId) : { protected: false, unlocked: false } };
+      return { ...value, apiUrl, ...(cfg?.opencode.deviceConnect !== false && cfg ? { siteUrl: cfg.opencode.siteUrl } : {}), security: client ? store.security(client.account.walletId) : { protected: false, unlocked: false } };
     };
     const notify = () => {
       if (!rpc || closing) return;
@@ -105,11 +105,13 @@ export default Plugin.define({
           for (let attempt = 0; ; attempt++) {
             const dispatchedAt = Date.now();
             if (!attempt) value.dispatched(call, dispatchedAt);
-            response = await fetch(outbound.clone());
-            if (response.status !== 401 || attempt >= 9) break;
-            const failure = providerError(await response.clone().json().catch(() => null));
-            if (!bookingPending(response.status, failure)) break;
-            await response.body?.cancel(); await Bun.sleep(cfg.opencode.pollIntervalMs / 20);
+            const headers = new AbortController(), timeout = setTimeout(() => headers.abort(new Error("Provider response headers timed out.")), 60_000);
+            try { response = await fetch(new Request(outbound.clone(), { signal: AbortSignal.any([outbound.signal, headers.signal]) })); }
+            finally { clearTimeout(timeout); }
+            if (response.ok) break;
+            const failure = await readProviderFailure(response, outbound.signal);
+            if (attempt >= 9 || !bookingPending(response.status, failure.error)) { response = failure.response; break; }
+            await Bun.sleep(cfg.opencode.pollIntervalMs / 20);
           }
           return value.response(outbound, response);
         } catch (error) {
@@ -141,16 +143,21 @@ export default Plugin.define({
     await ctx.integration.transform(editor => {
       editor.update("fossa", integration => { integration.name = "Fossa"; });
       editor.method.remove("fossa", { type: "key" });
-      for (const method of methods) editor.method.update({ integrationID: "fossa", method: { id: method, type: "oauth", label: method === "quick" ? "Quick connect with Fossa website" : "Import a private key", form: method === "import" ? [{ type: "string", key: "key", title: "Solana private key", placeholder: "Base58 private key or keypair JSON array", required: true }] : undefined },
-        authorize: async answer => {
-          backend();
-          if (method === "import") { const account = await importWallet(store, apiUrl, typeof answer.key === "string" ? answer.key : ""); return { mode: "auto", url: "", instructions: "Wallet encrypted on this computer. Optional passphrase protection is in /fossa → Security.", callback: Promise.resolve(credentialFor(account, method)) }; }
-          const setup = await quickConnect(store, apiUrl); setups.add(setup); void setup.completed.then(() => setups.delete(setup), () => setups.delete(setup));
-          return { mode: "auto", url: setup.url, instructions: `Approve on Fossa, then return to OpenCode. Wallet installation completes automatically.\nDevice: ${setup.label}\nConnection code: ${setup.code}\nDevice fingerprint: ${setup.fingerprint}`, expiresAt: setup.expires, callback: setup.completed.then(account => credentialFor(account, method)) };
-        },
-        refresh: async credential => credentialFor(await refreshAccount(accountFrom(credential)), method),
-        label: credential => String(credential.metadata?.name ?? "Fossa wallet"),
-      });
+      for (const method of methods) {
+        const enabled = method === "quick" ? cfg?.opencode.deviceConnect !== false : cfg?.opencode.manualImport !== false;
+        if (!enabled) { editor.method.remove("fossa", { id: method, type: "oauth", label: "" }); continue; }
+        editor.method.update({ integrationID: "fossa", method: { id: method, type: "oauth", label: method === "quick" ? "Quick connect with Fossa website" : "Import a private key", form: method === "import" ? [{ type: "string", key: "key", title: "Solana private key", placeholder: "Base58 private key or keypair JSON array", required: true }] : undefined },
+          authorize: async answer => {
+            const { cfg } = backend();
+            if ((method === "quick" ? cfg.opencode.deviceConnect : cfg.opencode.manualImport) === false) throw new FossaError("AUTH_UNSUPPORTED", "This connection method is unavailable on the selected API.");
+            if (method === "import") { const account = await importWallet(store, apiUrl, typeof answer.key === "string" ? answer.key : ""); return { mode: "auto", url: "", instructions: "Wallet encrypted on this computer. Optional passphrase protection is in /fossa → Security.", callback: Promise.resolve(credentialFor(account, method)) }; }
+            const setup = await quickConnect(store, apiUrl); setups.add(setup); void setup.completed.then(() => setups.delete(setup), () => setups.delete(setup));
+            return { mode: "auto", url: setup.url, instructions: `Approve on Fossa, then return to OpenCode. Wallet installation completes automatically.\nDevice: ${setup.label}\nConnection code: ${setup.code}\nDevice fingerprint: ${setup.fingerprint}`, expiresAt: setup.expires, callback: setup.completed.then(account => credentialFor(account, method)) };
+          },
+          refresh: async credential => credentialFor(await refreshAccount(accountFrom(credential)), method),
+          label: credential => String(credential.metadata?.name ?? "Fossa wallet"),
+        });
+      }
     });
     rpc = await ctx.rpc.register(Fossa, {
       attach: guarded(async input => {
@@ -176,7 +183,7 @@ export default Plugin.define({
           if (closing) return { apiUrl: next, defaultApiUrl: DEFAULT_API_URL };
           apiUrl = next; controller = new AbortController(); cfg = nextConfig; catalog = client = transport = problem = undefined;
           inventoryHash = lastStatus = ""; inventoryCatalog = undefined; failures = catalogAt = 0;
-          await ctx.provider.reload(); notify();
+          await ctx.integration.reload(); await ctx.provider.reload(); notify();
           return { apiUrl, defaultApiUrl: DEFAULT_API_URL };
         })().finally(() => { endpointChange = undefined; switching = false; if (restart && !closing) void poll(); });
       }),
@@ -206,7 +213,7 @@ export default Plugin.define({
         const modelId = (input as { model: string }).model, value = await requireClient(), model = value.catalog?.models.find(model => model.id === modelId);
         if (!model) throw Error("Fossa model unavailable.");
         const settings = value.settings(modelId);
-        return { id: model.id, name: model.name, settings, outputTokens: model.outputTokens, offers: rankOffers(eligible(model, settings, 0, 0), settings).map(offer => ({ provider: offer.provider.name, wallet: offer.provider.wallet, url: new URL(`/?provider=${encodeURIComponent(offer.provider.wallet)}`, cfg!.opencode.siteUrl).href, input: offer.inputRate / 1_000_000, cached: offer.cachedRate / 1_000_000, output: offer.outputRate / 1_000_000, speed: offer.speed, zdr: offer.private })) };
+        return { id: model.id, name: model.name, settings, outputTokens: model.outputTokens, offers: rankOffers(eligible(model, settings, 0, 0), settings).map(offer => ({ provider: offer.provider.name, wallet: offer.provider.wallet, url: cfg!.opencode.deviceConnect === false ? "" : new URL(`/?provider=${encodeURIComponent(offer.provider.wallet)}`, cfg!.opencode.siteUrl).href, input: offer.inputRate / 1_000_000, cached: offer.cachedRate / 1_000_000, output: offer.outputRate / 1_000_000, speed: offer.speed, zdr: offer.private })) };
       }),
       recover: guarded(async () => {
         const value = await requireClient(); return value.rakeback();
@@ -227,6 +234,8 @@ export default Plugin.define({
         if (closing || switching) return;
         if (!Array.isArray(next?.models) || next.programId !== nextConfig.programId || next.market !== nextConfig.market) throw new FossaError("CONFIGURATION", "Fossa catalog does not match its protocol configuration.");
         cfg = nextConfig; catalog = next; transport ??= startTransport(cfg); problem = undefined;
+        const capabilities = JSON.stringify([cfg.opencode.deviceConnect, cfg.opencode.manualImport]);
+        if (capabilities !== capabilitiesHash) { await ctx.integration.reload(); capabilitiesHash = capabilities; }
         await active();
         if (next !== inventoryCatalog || !inventoryHash) {
           const hash = createHash("sha256").update(JSON.stringify(next.models)).digest("hex");

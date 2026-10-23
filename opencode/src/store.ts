@@ -3,7 +3,7 @@ import { chmodSync, closeSync, fsyncSync, mkdirSync, openSync, readFileSync, wri
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { createCipheriv, createDecipheriv, randomBytes, scrypt, randomUUID } from "node:crypto";
-import { Keypair } from "@solana/web3.js";
+import { Keypair, Transaction } from "@solana/web3.js";
 import bs58 from "bs58";
 import { defaultSettings, priceFields, validateSettings } from "./routing";
 import { defaultRakeback, validateRakeback } from "./rakeback";
@@ -11,7 +11,11 @@ import { FossaError, type Account, type Settings, type WalletSecrets } from "./t
 
 const derive = (passphrase: string, salt: Buffer) => new Promise<Buffer>((resolve, reject) => scrypt(passphrase, salt, 32, { N: 65536, r: 8, p: 1, maxmem: 128 * 1024 * 1024 }, (error, key) => error ? reject(error) : resolve(key)));
 type Sealed = { protection?: "device" | "passphrase"; salt: string; iv: string; tag: string; ciphertext: string };
-export interface Pending { previousRequestId?: string; previousResponseFinishedAt?: number; requestGapMs?: number; gapToSubmitMs?: number; gapToProviderMs?: number; modelRequestAt?: number; transportReceivedAt?: number; walletLockMs?: number; recoveryWaitMs?: number; admissionWaitMs?: number; bookingPoolWaitMs?: number; bookingObservedAt?: number; providerDispatchedAt?: number; responseHeadersAt?: number; firstByteAt?: number; responseDoneAt?: number; responseFinishedAt?: number; responseCompleted?: boolean; settlementSlot?: number; settledAt?: number; confirmationMs?: number; cancelRequested?: boolean; cancelSent?: boolean; id: string; wallet: string; model: string; bodyHash: string; cache?: { messages: number; prefix: string }; kind: string; flow?: string; session: string; booking: string; generation: string; signature: string; transaction: string; expiry: number; reserve: string; stage: string; provider?: string; providerName?: string; endpoint?: string; claimEnd?: number; charge?: string; deposit?: string; withdrawal?: string; refund?: string; feeLamports?: string; processedSlot?: number; startedAt?: number; submittedAt?: number; prepareMs?: number; broadcastMs?: number; processedMs?: number; bookingSource?: "stream" | "rpc"; dispatchStarted?: boolean; providerRequestMs?: number; sendToProviderMs?: number; usage?: { input: number; cached: number; output: number }; created: number; error?: string }
+export type JournalScope = { program: string; market: string; lane: string; genesis?: string; mint?: string };
+const terminalStages = "'settled','released','failed','expired'";
+const scopeWhere = "json_extract(state,'$.scope.program')=? AND json_extract(state,'$.scope.market')=? AND json_extract(state,'$.scope.lane')=? AND json_extract(state,'$.scope.genesis')=? AND json_extract(state,'$.scope.mint')=?";
+const scopeValues = (scope: JournalScope) => [scope.program, scope.market, scope.lane, scope.genesis ?? "", scope.mint ?? ""];
+export interface Pending { scope?: JournalScope; source?: string; rentLamports?: string; previousRequestId?: string; previousResponseFinishedAt?: number; requestGapMs?: number; gapToSubmitMs?: number; gapToProviderMs?: number; modelRequestAt?: number; transportReceivedAt?: number; walletLockMs?: number; recoveryWaitMs?: number; admissionWaitMs?: number; bookingPoolWaitMs?: number; bookingObservedAt?: number; providerDispatchedAt?: number; responseHeadersAt?: number; firstByteAt?: number; responseDoneAt?: number; responseFinishedAt?: number; responseCompleted?: boolean; settlementSlot?: number; settledAt?: number; confirmationMs?: number; cancelRequested?: boolean; cancelSent?: boolean; id: string; wallet: string; model: string; bodyHash: string; cache?: { messages: number; prefix: string }; kind: string; flow?: string; session: string; booking: string; generation: string; signature: string; transaction: string; expiry: number; reserve: string; stage: string; provider?: string; providerName?: string; endpoint?: string; claimEnd?: number; charge?: string; deposit?: string; withdrawal?: string; refund?: string; feeLamports?: string; processedSlot?: number; startedAt?: number; submittedAt?: number; prepareMs?: number; broadcastMs?: number; processedMs?: number; bookingSource?: "stream" | "rpc"; dispatchStarted?: boolean; providerRequestMs?: number; sendToProviderMs?: number; usage?: { input: number; cached: number; output: number }; created: number; error?: string }
 
 export function validatePassphrase(value: unknown): asserts value is string {
   if (typeof value !== "string" || value.length < 3) throw new FossaError("WEAK_PASSPHRASE", "Use a local wallet passphrase of at least 3 characters.");
@@ -31,10 +35,36 @@ export async function parseKey(value: string) {
 export class Store {
   readonly db: Database;
   private keys = new Map<string, WalletSecrets>();
+  private journalMigrated = false;
   constructor(directory = join(homedir(), ".local", "share", "fossa-opencode")) {
     mkdirSync(directory, { recursive: true, mode: 0o700 }); chmodSync(directory, 0o700);
     const path = join(directory, "wallets.sqlite"); this.db = new Database(path, { create: true }); chmodSync(path, 0o600);
     this.db.exec("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=10000; CREATE TABLE IF NOT EXISTS wallets(id TEXT PRIMARY KEY,address TEXT NOT NULL,name TEXT NOT NULL,sealed TEXT NOT NULL,settings TEXT); CREATE TABLE IF NOT EXISTS pending(id TEXT PRIMARY KEY,wallet TEXT NOT NULL,state TEXT NOT NULL,created INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS pending_wallet_created ON pending(wallet,created); CREATE TABLE IF NOT EXISTS model_settings(wallet TEXT NOT NULL,model TEXT NOT NULL,settings TEXT NOT NULL,PRIMARY KEY(wallet,model)); CREATE TABLE IF NOT EXISTS locks(wallet TEXT PRIMARY KEY,owner TEXT NOT NULL,pid INTEGER NOT NULL,expires INTEGER NOT NULL)");
+    this.migrateJournal();
+  }
+  migrateJournal() {
+    if (this.journalMigrated) return;
+    this.db.exec("CREATE INDEX IF NOT EXISTS pending_scope ON pending(wallet,json_extract(state,'$.scope.program'),json_extract(state,'$.scope.market'),json_extract(state,'$.scope.lane'),created); CREATE INDEX IF NOT EXISTS pending_stage ON pending(wallet,json_extract(state,'$.stage')); CREATE INDEX IF NOT EXISTS pending_history ON pending(wallet,json_extract(state,'$.kind'),json_extract(state,'$.session'),json_extract(state,'$.flow'),created); CREATE INDEX IF NOT EXISTS pending_booking ON pending(wallet,json_extract(state,'$.booking'),json_extract(state,'$.generation'))");
+    const rows = this.db.query("SELECT state FROM pending WHERE json_extract(state,'$.scope') IS NULL").all() as { state: string }[];
+    for (const saved of rows) {
+      try {
+        const row = JSON.parse(saved.state) as Pending, tx = Transaction.from(Buffer.from(row.transaction, "base64"));
+        if (tx.feePayer?.toString() !== row.wallet || bs58.encode(tx.signatures[0].signature!) !== row.signature) continue;
+        const bindings = tx.instructions.flatMap(ix => {
+          const op = ix.data[0], keys = ix.keys, at = op === 6 ? [0, 4, 5] : op === 1 ? [2, 0, 1] : [3, 10, 26].includes(op) ? [0, 1, 2] : undefined;
+          if (!at || !keys[at[2]]?.isSigner || keys[at[2]].pubkey.toString() !== row.wallet) return [];
+          if (keys.length !== ({ 1: 4, 3: 7, 6: 8, 10: 8, 26: 5 } as Record<number, number>)[op] || (op !== 6 && ix.data.length !== ([3, 10].includes(op) ? 9 : 1))) return [];
+          if (op === 6 && (keys[6]?.pubkey.toString() !== row.booking || ![108, 116].includes(ix.data.length) || (ix.data.length === 116 ? Buffer.from(ix.data).readBigUInt64LE(108).toString() : "0") !== row.generation)) return [];
+          return [{ program: ix.programId.toString(), market: keys[at[0]].pubkey.toString(), lane: keys[at[1]].pubkey.toString() }];
+        });
+        if (!bindings.length || bindings.some(value => JSON.stringify(value) !== JSON.stringify(bindings[0]))) continue;
+        row.scope = bindings[0];
+        const transfer = tx.instructions.find(ix => ix.programId.toString() === row.scope!.program && [3, 10].includes(ix.data[0]));
+        if (transfer) { row.source = transfer.keys[transfer.data[0] === 3 ? 3 : 4]?.pubkey.toString(); row.scope.mint = transfer.keys[5]?.pubkey.toString(); }
+        this.put(row);
+      } catch { /* retain unknown legacy journals for explicit recovery; never guess their lane. */ }
+    }
+    this.journalMigrated = true;
   }
   private deviceKey(create = false) {
     const path = join(dirname(this.db.filename), "device.key");
@@ -117,22 +147,67 @@ export class Store {
     return value;
   }
   rakebackRan(id: string) { this.setRakeback(id, {}); this.db.query("UPDATE rakeback_settings SET last_run=? WHERE wallet=?").run(Date.now(), id); }
-  pending(wallet?: string) { return (wallet ? this.db.query("SELECT state FROM pending WHERE wallet=? ORDER BY created").all(wallet) : this.db.query("SELECT state FROM pending ORDER BY created").all()).map(row => JSON.parse((row as { state: string }).state) as Pending); }
-  request(id: string, wallet: string) { const row = this.db.query("SELECT state FROM pending WHERE id=? AND wallet=?").get(id, wallet) as { state: string } | null; return row ? JSON.parse(row.state) as Pending : undefined; }
-  previousInference(id: string, wallet: string, session: string, flow: string) {
-    const row = this.db.query("SELECT state FROM pending WHERE wallet=? AND id<>? AND json_extract(state,'$.kind')='inference' AND json_extract(state,'$.session')=? AND json_extract(state,'$.flow')=? ORDER BY created DESC,rowid DESC LIMIT 1").get(wallet, id, session, flow) as { state: string } | null;
+  pending(wallet?: string, scope?: JournalScope, active = false) {
+    const where = [...(wallet ? ["wallet=?"] : []), ...(scope ? [scopeWhere] : []), ...(active ? [`json_extract(state,'$.stage') NOT IN (${terminalStages})`] : [])];
+    return (this.db.query(`SELECT state FROM pending${where.length ? ` WHERE ${where.join(" AND ")}` : ""} ORDER BY created,rowid`).all(...(wallet ? [wallet] : []), ...(scope ? scopeValues(scope) : [])) as { state: string }[]).map(row => JSON.parse(row.state) as Pending);
+  }
+  legacy(wallet: string) {
+    return (this.db.query(`SELECT state FROM pending WHERE wallet=? AND (json_extract(state,'$.scope.genesis') IS NULL OR json_extract(state,'$.scope.mint') IS NULL) AND json_extract(state,'$.stage') NOT IN (${terminalStages})`).all(wallet) as { state: string }[]).map(row => JSON.parse(row.state) as Pending);
+  }
+  accounting(wallet: string, slot: number, genesis?: string) {
+    return (this.db.query(`SELECT state FROM pending WHERE wallet=?${genesis ? " AND json_extract(state,'$.scope.genesis')=?" : ""} AND json_extract(state,'$.stage') NOT IN ('failed','expired') AND (json_extract(state,'$.processedSlot')>? OR json_extract(state,'$.settlementSlot')>? OR (json_extract(state,'$.processedSlot') IS NULL AND json_extract(state,'$.stage') NOT IN (${terminalStages}))) ORDER BY created`).all(wallet, ...(genesis ? [genesis] : []), slot, slot) as { state: string }[]).map(row => JSON.parse(row.state) as Pending);
+  }
+  history(wallet: string, scope?: JournalScope) {
+    return this.db.query(`SELECT id,json_extract(state,'$.booking') AS booking,json_extract(state,'$.generation') AS generation,json_extract(state,'$.charge') AS charge,json_extract(state,'$.stage') AS stage FROM pending WHERE wallet=? AND json_extract(state,'$.kind')='inference'${scope ? ` AND ${scopeWhere}` : ""}`).all(wallet, ...(scope ? scopeValues(scope) : [])) as { id: string; booking: string; generation: string; charge?: string; stage: string }[];
+  }
+  generation(wallet: string, scope: JournalScope) {
+    const row = this.db.query(`SELECT ltrim(json_extract(state,'$.generation'),'0') AS generation FROM pending WHERE wallet=? AND ${scopeWhere} AND json_extract(state,'$.stage') NOT IN ('failed','expired') ORDER BY length(generation) DESC,generation DESC LIMIT 1`).get(wallet, ...scopeValues(scope)) as { generation: string } | null;
+    return BigInt(row?.generation || "0");
+  }
+  cacheHistory(wallet: string, session: string, flow: string, model: string, scope?: JournalScope) {
+    return this.db.query(`SELECT state FROM pending WHERE wallet=? AND json_extract(state,'$.kind')='inference' AND json_extract(state,'$.session')=? AND json_extract(state,'$.flow')=? AND json_extract(state,'$.model')=? AND json_extract(state,'$.stage') IN ('settling','settled')${scope ? ` AND ${scopeWhere}` : ""} ORDER BY created DESC,rowid DESC`).iterate(wallet, session, flow, model, ...(scope ? scopeValues(scope) : []));
+  }
+  request(id: string, wallet: string, scope?: JournalScope) {
+    const row = this.db.query(`SELECT state FROM pending WHERE id=? AND wallet=?${scope ? ` AND ${scopeWhere}` : ""}`).get(id, wallet, ...(scope ? scopeValues(scope) : [])) as { state: string } | null;
     return row ? JSON.parse(row.state) as Pending : undefined;
   }
-  put(value: Pending) {
-    const previous = this.request(value.id, value.wallet);
-    if (previous?.settlementSlot !== undefined && previous.booking === value.booking && previous.generation === value.generation
-      && (value.settlementSlot === undefined || previous.settlementSlot >= value.settlementSlot)) {
-      value.stage = previous.stage; value.charge = previous.charge; value.settlementSlot = previous.settlementSlot; value.settledAt = previous.settledAt;
+  booking(wallet: string, booking: string, generation: string, scope?: JournalScope) {
+    const row = this.db.query(`SELECT state FROM pending WHERE wallet=? AND json_extract(state,'$.booking')=? AND json_extract(state,'$.generation')=?${scope ? ` AND ${scopeWhere}` : ""} LIMIT 1`).get(wallet, booking, generation, ...(scope ? scopeValues(scope) : [])) as { state: string } | null;
+    return row ? JSON.parse(row.state) as Pending : undefined;
+  }
+  previousInference(id: string, wallet: string, session: string, flow: string, scope?: JournalScope) {
+    const row = this.db.query(`SELECT state FROM pending WHERE wallet=? AND id<>? AND json_extract(state,'$.kind')='inference' AND json_extract(state,'$.session')=? AND json_extract(state,'$.flow')=?${scope ? ` AND ${scopeWhere}` : ""} ORDER BY created DESC,rowid DESC LIMIT 1`).get(wallet, id, session, flow, ...(scope ? scopeValues(scope) : [])) as { state: string } | null;
+    return row ? JSON.parse(row.state) as Pending : undefined;
+  }
+  put(value: Pending) { this.db.transaction(() => this.savePending(value)).immediate(); }
+  archiveFailed(value: Pending) {
+    this.db.transaction(() => {
+      const current = this.request(value.id, value.wallet, value.scope);
+      if (!current || current.stage !== "failed" || current.signature !== value.signature) throw new FossaError("RECOVERY_PENDING", "Transaction outcome changed before retry. Preserve the journal and recover first.");
+      this.savePending({ ...current, id: `${current.id}:failed:${current.signature}` });
+      this.db.query("DELETE FROM pending WHERE id=? AND wallet=?").run(current.id, current.wallet);
+    }).immediate();
+  }
+  private savePending(value: Pending) {
+    const saved = this.db.query("SELECT state FROM pending WHERE id=?").get(value.id) as { state: string } | null;
+    const previous = saved ? JSON.parse(saved.state) as Pending : undefined;
+    if (previous) {
+      if (previous.wallet !== value.wallet || previous.booking !== value.booking || previous.generation !== value.generation || previous.scope && value.scope && Object.entries(previous.scope).some(([key, field]) => field !== undefined && field !== value.scope![key as keyof JournalScope])) throw new FossaError("JOURNAL_CHANGED", "Saved transaction identity changed. Preserve the journal and recover before retrying.");
+      const merged = { ...previous, ...Object.fromEntries(Object.entries(value).filter(([, field]) => field !== undefined)) } as Pending;
+      const proven = ["settled", "released"].includes(previous.stage);
+      if (proven && (!['settled', 'released'].includes(value.stage) || BigInt(previous.charge ?? "0") > 0n || value.stage === "released" && previous.stage === "settled") || previous.settlementSlot !== undefined && (value.settlementSlot === undefined || previous.settlementSlot >= value.settlementSlot)) {
+        merged.stage = previous.stage; merged.charge = previous.charge; merged.settlementSlot = previous.settlementSlot; merged.settledAt = previous.settledAt;
+      }
+      if (previous.cancelRequested) merged.cancelRequested = true;
+      if (previous.cancelSent) merged.cancelSent = true;
+      if (previous.responseCompleted) merged.responseCompleted = true;
+      Object.assign(value, merged);
     }
-    if (previous?.cancelRequested) value.cancelRequested = true;
-    if (previous?.cancelSent) value.cancelSent = true;
     if (value.cancelRequested && !["settled", "released", "failed", "expired"].includes(value.stage)) value.stage = "uncertain";
-    this.db.query("INSERT INTO pending VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET state=excluded.state").run(value.id, value.wallet, JSON.stringify(value), value.created); }
+    const state = JSON.stringify(value);
+    if (saved?.state === state) return;
+    this.db.query("INSERT INTO pending VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET state=excluded.state").run(value.id, value.wallet, state, value.created);
+  }
   async exclusive<T>(wallet: string, action: () => Promise<T>) {
     const owner = randomUUID(), deadline = Date.now() + 60_000;
     while (true) {
@@ -153,6 +228,7 @@ export function localStore() {
   const cache = globalThis as typeof globalThis & { [shared]?: Store };
   const store = cache[shared] ??= new Store();
   Object.setPrototypeOf(store, Store.prototype);
+  store.migrateJournal();
   store.db.exec("CREATE TABLE IF NOT EXISTS model_settings(wallet TEXT NOT NULL,model TEXT NOT NULL,settings TEXT NOT NULL,PRIMARY KEY(wallet,model)); CREATE INDEX IF NOT EXISTS pending_wallet_created ON pending(wallet,created)");
   return store;
 }

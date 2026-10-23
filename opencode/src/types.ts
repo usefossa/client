@@ -1,6 +1,6 @@
 export interface PublicConfig {
   programId: string; market: string; usdcMint: string; solanaRpc: string;
-  opencode: { siteUrl: string; deviceTtlSecs: number; maxInputTokens: number; maxRequestBytes: number; catalogMaxAgeMs: number; requestTimeoutMs: number; pollIntervalMs: number; mainnetGenesisHash: string; localBookingPoolSize: number };
+  opencode: { deviceConnect?: boolean; manualImport?: boolean; siteUrl: string; deviceTtlSecs: number; maxInputTokens: number; maxRequestBytes: number; catalogMaxAgeMs: number; requestTimeoutMs: number; pollIntervalMs: number; mainnetGenesisHash: string; localBookingPoolSize: number };
 }
 export interface Offer {
   slot: number; provider: { wallet: string; name: string; endpoint?: string; approved: boolean }; inputRate: number; cachedRate: number; outputRate: number;

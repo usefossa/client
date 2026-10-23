@@ -5,7 +5,7 @@ import { jsx, type JSX } from "opentui:runtime-module:%40opentui%2Fsolid%2Fjsx-r
 
 const Conditional: (props: { when: unknown; fallback?: JSX.Element; children: JSX.Element }) => JSX.Element = Show;
 
-type Page = { kind: "select" | "alert" | "prompt"; title: string; message?: string; description?: string; placeholder?: string; search?: boolean; current?: string; options?: readonly (DialogSelectOption<string> & { loading?: boolean })[] };
+type Page = { kind: "select" | "alert" | "prompt"; title: string; message?: string; description?: string; placeholder?: string; password?: boolean; search?: boolean; current?: string; options?: readonly (DialogSelectOption<string> & { loading?: boolean })[] };
 
 export function settingsDialog(context: Context) {
   const [page, setPage] = createSignal<Page>({ kind: "select", title: "Fossa Settings" }), [selected, setSelected] = createSignal(0), [value, setValue] = createSignal(""), [query, setQuery] = createSignal(""), [busy, setBusy] = createSignal(false), [active, setActive] = createSignal(false);
@@ -15,7 +15,30 @@ export function settingsDialog(context: Context) {
     return (page().options ?? []).filter(item => words.every(word => `${item.title} ${item.description ?? ""} ${item.category ?? ""} ${item.footer ?? ""}`.toLowerCase().includes(word)));
   });
   let mounted = false, resolve: ((value?: string) => void) | undefined, search: InputRenderable | undefined, input: InputRenderable | undefined, scroll: ScrollBoxRenderable | undefined;
-  const finish = (answer?: string) => { if (busy()) return; setBusy(true); const done = resolve; resolve = undefined; done?.(answer); };
+  const clearInput = () => { setValue(""); if (input && !input.isDestroyed) { input.clearSelection(); input.setText(""); } };
+  const finish = (answer?: string) => { if (busy()) return; setBusy(true); const done = resolve; resolve = undefined; clearInput(); done?.(answer); };
+  const prepareInput = (node: InputRenderable) => {
+    input = node;
+    const insert = node.insertText.bind(node);
+    node.insertText = text => {
+      if (!page().password) return insert(text);
+      const chars = Array.from(value()), added = Array.from(text.replace(/[\r\n]/g, "")), selection = node.getSelection();
+      const start = selection?.start ?? node.cursorOffset, end = selection?.end ?? start;
+      chars.splice(start, end - start, ...added); node.clearSelection();
+      setValue(chars.join("")); node.value = "*".repeat(chars.length); node.cursorOffset = start + added.length;
+    };
+    for (const key of ["deleteCharBackward", "deleteChar", "deleteLine", "deleteWordBackward", "deleteWordForward", "deleteToLineStart", "deleteToLineEnd"] as const) {
+      const remove = node[key].bind(node);
+      node[key] = () => {
+        if (!page().password) return remove();
+        const chars = Array.from(value()), cursor = node.cursorOffset, selection = node.getSelection(), result = remove();
+        chars.splice(selection?.start ?? Math.min(cursor, node.cursorOffset), chars.length - node.value.length);
+        const offset = node.cursorOffset; setValue(chars.join("")); node.cursorOffset = offset; return result;
+      };
+    }
+    for (const key of ["undo", "redo"] as const) { const original = node[key].bind(node); node[key] = () => page().password ? false : original(); }
+    focus();
+  };
   const submit = () => { const item = options()[selected()]; if (page().kind === "prompt") finish(value()); else if (page().kind === "alert") finish(); else if (item && !item.disabled) finish(item.value); };
   const focus = () => queueMicrotask(() => { const node = page().kind === "select" ? page().search ? search : undefined : input; if (node && !node.isDestroyed) node.focus(); });
   const height = () => {
@@ -99,8 +122,8 @@ export function settingsDialog(context: Context) {
             ]; } }),
             createComponent(Conditional, { get when() { return page().kind === "prompt"; }, get children() {
               return jsx("box", { paddingLeft: 3, paddingRight: 3, get children() {
-                return jsx("input", { get value() { return value(); }, onInput: setValue, get placeholder() { return page().placeholder; },
-                  get textColor() { return theme().text.base; }, get focusedTextColor() { return theme().text.base; }, get cursorColor() { return theme().text.base; }, ref: (node: InputRenderable) => { input = node; focus(); },
+                return jsx("input", { get value() { return page().password ? "*".repeat(Array.from(value()).length) : value(); }, onInput: (text: string) => { if (!page().password) setValue(text); }, get placeholder() { return page().placeholder; },
+                  get textColor() { return theme().text.base; }, get focusedTextColor() { return theme().text.base; }, get cursorColor() { return theme().text.base; }, ref: prepareInput,
                 });
               } });
             } }),
@@ -111,7 +134,7 @@ export function settingsDialog(context: Context) {
             return jsx("text", { get fg() { return theme().text.base; }, attributes: 1, onMouseUp: submit, get children() { return page().kind === "alert" ? "OK" : "Save"; } });
           } });
         } }),
-      ]; } }), () => { mounted = false; setActive(false); const done = resolve; resolve = undefined; done?.(); });
+      ]; } }), () => { mounted = false; setActive(false); const done = resolve; resolve = undefined; clearInput(); done?.(); });
     }
     focus(); return result;
   };
@@ -129,9 +152,9 @@ export function settingsDialog(context: Context) {
       batch(() => { setPage(value => ({ ...value, ...patch })); const index = options().findIndex(item => item.value === current && !item.disabled); setSelected(Math.max(0, index < 0 ? options().findIndex(item => !item.disabled) : index)); });
     },
     begin: () => setActive(true),
-    close: () => { if (mounted) context.ui.dialog.clear(); else setActive(false); },
+    close: () => { clearInput(); if (mounted) context.ui.dialog.clear(); else setActive(false); },
     select: (options: Omit<Page, "kind"> & { current?: string }) => present({ ...options, kind: "select" }, "", options.current),
     alert: async (options: { title: string; message: string }) => { await present({ ...options, kind: "alert" }); },
-    prompt: (options: { title: string; description?: string; placeholder?: string; value?: string }) => present({ ...options, kind: "prompt" }, options.value),
+    prompt: (options: { title: string; description?: string; placeholder?: string; value?: string; password?: boolean }) => present({ ...options, kind: "prompt" }, options.value),
   };
 }

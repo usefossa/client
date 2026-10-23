@@ -19,9 +19,11 @@ export function providerRow(context: Context, sample: TextRenderable, offer: Mod
     const node = new Text(context.renderer, { content, fg: bright ? theme.text.base : theme.text.muted, flexShrink: 0 }); amounts.add(node); return node;
   };
   const name = add(offer.provider, true);
-  name.onMouseOver = () => { name.fg = accent.text.action.primary.focused; name.bg = accent.background.action.primary.focused; };
-  name.onMouseOut = () => { name.fg = theme.text.base; name.bg = "transparent"; };
-  name.onMouseUp = () => openProvider(context, offer.url);
+  if (offer.url) {
+    name.onMouseOver = () => { name.fg = accent.text.action.primary.focused; name.bg = accent.background.action.primary.focused; };
+    name.onMouseOut = () => { name.fg = theme.text.base; name.bg = "transparent"; };
+    name.onMouseUp = () => openProvider(context, offer.url);
+  }
   if (best) {
     add(" ");
     amounts.add(new Text(context.renderer, { content: " Best ", fg: accent.text.action.primary.focused, bg: accent.background.action.primary.focused, attributes: 1, flexShrink: 0 }));

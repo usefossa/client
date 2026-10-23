@@ -43,7 +43,7 @@ for (const action of ["reload", "endpoint"]) for (const phase of ["booking", "st
       const cleanup = await plugin.setup({ app: { version: "2.0.32" }, options: { apiUrl: server.url.origin },
         storage: { get: async (key: string) => preferences.get(key), set: async (key: string, value: unknown) => { preferences.set(key, value); } },
         provider: { transform: async () => {}, reload: async () => {} },
-        integration: { transform: async () => {}, connection: { active: async () => "fixture", resolve: async () => ({ type: "oauth", ...account, metadata: account }) } },
+        integration: { reload: async () => {}, transform: async () => {}, connection: { active: async () => "fixture", resolve: async () => ({ type: "oauth", ...account, metadata: account }) } },
         session: { hook: async (name: string, callback: typeof callbacks[string]) => { callbacks[name] = callback; } },
         rpc: { register: async (_: unknown, methods: typeof handlers[number]) => { handlers.push(methods); return { events: { emit: async () => {} } }; } },
       } as never) as () => unknown;

@@ -85,7 +85,7 @@ export default Plugin.define({
     const unlock = async () => {
       let message: string | undefined;
       while (dialog.active() && !stopped) {
-        const passphrase = await dialog.prompt({ title: "Unlock Fossa wallet", description: message ?? "Enter your wallet passphrase." });
+        const passphrase = await dialog.prompt({ title: "Unlock Fossa wallet", password: true, description: message ?? "Enter your wallet passphrase." });
         if (passphrase === undefined) return false;
         try { await rpc.unlock({ passphrase }); await sync(); return true; }
         catch (error) { message = errorMessage(error); }
@@ -118,7 +118,7 @@ export default Plugin.define({
           else {
             if (value.protected && !value.unlocked) { await unlock(); if (!(await rpc.security({}) as { unlocked: boolean }).unlocked) continue; }
             if (choice === "enable") {
-              const passphrase = await dialog.prompt({ title: "Set passphrase", description: "At least 3 characters. Required to unlock after restarting OpenCode." });
+              const passphrase = await dialog.prompt({ title: "Set passphrase", password: true, description: "At least 3 characters. Required to unlock after restarting OpenCode." });
               if (passphrase === undefined) continue; await rpc.security({ action: "enable", passphrase });
             } else await rpc.security({ action: "disable" });
           }

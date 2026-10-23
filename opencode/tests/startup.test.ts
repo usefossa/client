@@ -22,7 +22,7 @@ test("early status failure cannot poison activation after the backend becomes re
     stop = await plugin.setup({ app: { version: "2.0.26" }, options: { apiUrl: server.url.origin },
       storage: { get: async () => undefined },
       provider: { transform: async () => {}, reload: async () => { reloads++; } },
-      integration: { transform: async (edit: (editor: unknown) => void) => edit({ update: () => {}, method: { remove: () => {}, update: ({ method }: { method: typeof methods[number] }) => methods.push(method) } }), connection: { active: async () => undefined } },
+      integration: { reload: async () => {}, transform: async (edit: (editor: unknown) => void) => edit({ update: () => {}, method: { remove: () => {}, update: ({ method }: { method: typeof methods[number] }) => methods.push(method) } }), connection: { active: async () => undefined } },
       session: { hook: async (name: string, callback: (event: any) => Promise<void>, options?: { providerID?: string }) => { hooks.push({ name, callback, options }); } },
       rpc: { register: async (_: unknown, value: typeof handlers) => { handlers = value; return { events: { emit: async () => {} } }; } },
     } as never) as () => Promise<void>;

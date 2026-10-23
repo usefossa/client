@@ -5,6 +5,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
+import bs58 from "bs58";
 import { verifyMessage } from "./signing";
 import { Store } from "../src/store";
 import { FossaClient } from "../src/client";
@@ -15,7 +16,7 @@ import { rustProvider } from "./provider";
 
 const providerTest = test.skipIf(!process.env.FOSSA_PROVIDER_ROOT);
 
-async function fixture(customError = 2) {
+async function fixture(customError = 2, retries = 0) {
   const directory = mkdtempSync(join(tmpdir(), "fossa-client-test-")), store = new Store(directory);
   const owner = await Keypair.generate(), lane = await Keypair.generate(), booking = await Keypair.generate(), provider = await Keypair.generate(), program = (await Keypair.generate()).publicKey, market = (await Keypair.generate()).publicKey, model = (await PublicKey.findProgramAddress([Buffer.from("model"), market.toBytes(), createHash("sha256").update("fixture/coder").digest()], program))[0], mint = (await Keypair.generate()).publicKey;
   const source = await getAssociatedTokenAddress(mint, owner.publicKey), vault = await getAssociatedTokenAddress(mint, (await PublicKey.findProgramAddress([Buffer.from("vault"), lane.publicKey.toBytes()], program))[0], true);
@@ -30,6 +31,9 @@ async function fixture(customError = 2) {
   const sockets = new Set<import("bun").ServerWebSocket<SocketData>>();
   const records = new Map([[source.toString(), { data: tokenData, owner: TOKEN_PROGRAM_ID }], [lane.publicKey.toString(), { data: userData, owner: program }], [booking.publicKey.toString(), { data: bookData, owner: program }]]);
   records.set(model.toString(), { data: modelData, owner: program });
+  const receipt = Buffer.alloc(736); receipt.write("RECEIPT1"); Buffer.from(market.toBytes()).copy(receipt, 8); Buffer.from(model.toBytes()).copy(receipt, 40); Buffer.from(provider.publicKey.toBytes()).copy(receipt, 72);
+  receipt.writeBigInt64LE(BigInt(Math.floor(Date.now() / 1000) - 10), 176); receipt.writeBigInt64LE(BigInt(Math.floor(Date.now() / 1000) + 1800), 184);
+  records.set((await Keypair.generate()).publicKey.toString(), { data: receipt, owner: program });
   let cfg: PublicConfig, catalog: Catalog, providerServer: Awaited<ReturnType<typeof rustProvider>>;
   const server = Bun.serve<SocketData>({ hostname: "127.0.0.1", port: 0, websocket: {
     async open(socket) {
@@ -66,6 +70,13 @@ async function fixture(customError = 2) {
     else if (body.method === "getFeeForMessage") result = { context: { slot: 100 }, value: 5000 };
     else if (body.method === "getBlockHeight") result = 100;
     else if (body.method === "getSignatureStatuses") result = { context: { slot: 100 }, value: body.params[0].map((value: string) => !hideStatus && (confirmedSignatures.has(value) || failures.has(value)) ? { slot: 100, confirmations: 1, confirmationStatus: "confirmed", err: failures.has(value) ? { InstructionError: [1, { Custom: customError }] } : null } : null) };
+    else if (body.method === "getProgramAccounts") {
+      const options = body.params[1];
+      expect(options.commitment).toBe(options.filters.some((filter: { dataSize?: number; memcmp?: { offset: number; bytes: string } }) => filter.dataSize === 736 || filter.memcmp?.offset === 0 && Buffer.from(bs58.decode(filter.memcmp.bytes)).toString() === "BOOK0V20") ? "processed" : "confirmed");
+      expect(options.withContext).toBe(true);
+      expect(Number(options.minContextSlot ?? 0)).toBeLessThanOrEqual(100);
+      result = { context: { slot: 100 }, value: [...records].filter(([, value]) => value.owner.toString() === body.params[0] && options.filters.every((filter: { dataSize?: number; memcmp?: { offset: number; bytes: string } }) => filter.dataSize === undefined ? filter.memcmp && value.data.subarray(filter.memcmp.offset, filter.memcmp.offset + bs58.decode(filter.memcmp.bytes).length).equals(bs58.decode(filter.memcmp.bytes)) : value.data.length === filter.dataSize)).map(([pubkey, value]) => ({ pubkey, account: { data: [value.data.toString("base64"), "base64"], owner: value.owner.toString(), lamports: 1000, executable: false, rentEpoch: 0 } })) };
+    }
     else if (body.method === "getMultipleAccounts") result = { context: { slot: 100 }, value: body.params[0].map((address: string) => {
       const value = records.get(address); if (!value) return address === owner.publicKey.toString() ? { data: ["", "base64"], owner: "11111111111111111111111111111111", lamports: 1_000_000, executable: false, rentEpoch: 0 } : null;
       return { data: [value.data.toString("base64"), "base64"], owner: value.owner.toString(), lamports: 1000, executable: false, rentEpoch: 0 };
@@ -98,6 +109,9 @@ async function fixture(customError = 2) {
   } });
   cfg = { programId: program.toString(), market: market.toString(), usdcMint: mint.toString(), solanaRpc: server.url.origin + "/rpc", opencode: { siteUrl: server.url.origin, deviceTtlSecs: 60, maxInputTokens: 65536, maxRequestBytes: 2_200_000, catalogMaxAgeMs: 30_000, requestTimeoutMs: 5000, pollIntervalMs: 100, mainnetGenesisHash: "fixture-mainnet-genesis", localBookingPoolSize: 2 } };
   catalog = { ready: true, slot: 100, programId: cfg.programId, market: cfg.market, models: [{ id: "fixture/coder", address: model.toString(), name: "Fixture coder", terms: (await Keypair.generate()).publicKey.toString(), capacity: (await Keypair.generate()).publicKey.toString(), contextTokens: 65536, outputTokens: 8192, capabilities: { tools: true, reasoning: true }, modalities: { input: ["text"], output: ["text"] }, offers: [{ slot: 0, provider: { wallet: provider.publicKey.toString(), name: "Fixture provider", endpoint: server.url.origin + "/v1/chat/completions", approved: true }, inputRate: 500000, cachedRate: 40000, outputRate: 2000000, speed: 100, available: true, approved: true, active: true, private: false, fundedBond: "100000000", exposure: "0", capacity: 10, activeBookings: 0 }] }] };
+  let providerStream: ReturnType<typeof Bun.serve>;
+  try { providerStream = Bun.serve({ hostname: "127.0.0.1", port: Number(server.port) + 1, fetch(request, socket) { if (socket.upgrade(request, { data: undefined })) return; return new Response(null, { status: 400 }); }, websocket: { message(socket, message) { const request = JSON.parse(String(message)); socket.send(JSON.stringify({ jsonrpc: "2.0", id: request.id, result: request.method.endsWith("Unsubscribe") ? true : request.id })); } } }); }
+  catch (error) { server.stop(true); store.close(); rmSync(directory, { recursive: true, force: true }); if ((error as { code?: string }).code === "EADDRINUSE" && retries < 10) return fixture(customError, retries + 1); throw error; }
   providerServer = await rustProvider({ rpc: cfg.solanaRpc, program: cfg.programId, market: cfg.market, mint: cfg.usdcMint, seed: [...provider.secretKey.slice(0, 32)] });
   catalog.models[0].offers[0].provider.endpoint = providerServer.url + "/v1/chat/completions";
   const account: Account = { walletId: "fixture-wallet", wallet: owner.publicKey.toString(), lane: lane.publicKey.toString(), name: "Fixture", apiUrl: server.url.origin, rpcUrl: server.url.origin + "/rpc", rpcWsUrl: server.url.origin.replace("http:", "ws:") + "/rpc", access: "fixture-access", refresh: "fixture-refresh", expires: Date.now() + 100000 };
@@ -112,7 +126,7 @@ async function fixture(customError = 2) {
     addBooking: async () => { const address = (await Keypair.generate()).publicKey.toString(), data = Buffer.from(bookData); data[148] = 5; data.writeBigUInt64LE(0n, 152); records.set(address, { data, owner: program }); client.wallet!.bookings.push({ address, status: 5, generation: "0", rentPayer: owner.publicKey.toString() }); return address; },
     staleBooking: () => { client.wallet!.bookings.unshift({ address: deleted, status: 5, generation: "0", rentPayer: owner.publicKey.toString() }); },
     closeBooking: () => { for (const socket of sockets) if (socket.data.live) socket.send(JSON.stringify({ type: "booking", address: booking.publicKey.toString(), data: { owner: null, data: null, slot: 101, version: 1 } })); },
-    submissions: () => submitted, hideStatus: () => { hideStatus = true; }, loseResponse: () => { lostFirst = true; }, close: async () => { client.stop(); await providerServer.close(); await Bun.sleep(600); store.close(); server.stop(true); owner.secretKey.fill(0); provider.secretKey.fill(0); rmSync(directory, { recursive: true, force: true }); } };
+    submissions: () => submitted, hideStatus: () => { hideStatus = true; }, loseResponse: () => { lostFirst = true; }, close: async () => { client.stop(); await providerServer.close(); await Bun.sleep(600); store.close(); server.stop(true); providerStream.stop(true); owner.secretKey.fill(0); provider.secretKey.fill(0); rmSync(directory, { recursive: true, force: true }); } };
 }
 
 for (const streamed of [true, false]) providerTest(`settlement admission resumes from ${streamed ? "live catalog" : "HTTP fallback"} without another payment`, async () => {
@@ -438,7 +452,7 @@ providerTest("aborting active response cancels reader and durably marks original
     const upstream = new ReadableStream<Uint8Array>({ start(value) { value.enqueue(new TextEncoder().encode('data: {"choices":[{"delta":{"content":"partial"}}]}\n\n')); }, cancel() { cancelled = true; } });
     const response = f.client.response(new Request(routed.url, { headers: routed.headers, signal: controller.signal }), new Response(upstream, { headers: { "content-type": "text/event-stream" } }));
     const reader = response.body!.getReader(); await reader.read(); controller.abort();
-    await reader.read();
+    await expect(reader.read()).rejects.toThrow();
     expect(cancelled).toBe(true);
     await f.client.cancel("active-stop");
     expect(f.store.request("active-stop", f.account.wallet)!.cancelRequested).toBe(true);
