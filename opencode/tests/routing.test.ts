@@ -6,17 +6,17 @@ import { defaultSettings, eligible, rankOffers, validateSettings } from "../src/
 import { Store } from "../src/store";
 import type { MarketModel, Offer } from "../src/types";
 
-const offer = (slot: number, rate: number, speed: number, zdr = false): Offer => ({ slot, provider: { wallet: `provider-${slot}`, name: `Provider ${slot}`, endpoint: "https://provider.invalid/v1/chat/completions", approved: true }, inputRate: rate, cachedRate: rate, outputRate: rate, speed, available: true, approved: true, active: true, private: zdr, fundedBond: "10000000000", exposure: "0", capacity: 10, activeBookings: 0 });
+const offer = (slot: number, rate: number, speed: number, zdr = false): Offer => ({ slot, provider: { wallet: `provider-${slot}`, name: `Provider ${slot}`, endpoint: "https://provider.invalid/v1/chat/completions" }, inputRate: rate, cachedRate: rate, outputRate: rate, speed, available: true, active: true, private: zdr, capacity: 10, activeBookings: 0 });
 const offers = [offer(0, 1000000, 10), offer(1, 2000000, 50, true), offer(2, 9000000, 100)];
 
-test("routing modes rank distinct offers and enforce price, speed, ZDR, and solvency", () => {
+test("routing modes rank distinct offers and enforce price, speed, ZDR, and capacity", () => {
   expect(rankOffers(offers, { ...defaultSettings, mode: "cheapest" })[0].slot).toBe(0);
   expect(rankOffers(offers, { ...defaultSettings, mode: "balanced" })[0].slot).toBe(1);
   expect(rankOffers(offers, { ...defaultSettings, mode: "fastest" })[0].slot).toBe(2);
   const model = { offers } as MarketModel;
-  expect(eligible(model, { ...defaultSettings, zdrOnly: true }, 1000, 1000).map(value => value.slot)).toEqual([1]);
-  expect(eligible(model, { ...defaultSettings, minSpeed: 50, maxOutputPrice: 2 }, 1000, 1000).map(value => value.slot)).toEqual([1]);
-  expect(eligible({ offers: [{ ...offers[0], fundedBond: "1" }] } as MarketModel, defaultSettings, 1000, 1000)).toEqual([]);
+  expect(eligible(model, { ...defaultSettings, zdrOnly: true }).map(value => value.slot)).toEqual([1]);
+  expect(eligible(model, { ...defaultSettings, minSpeed: 50, maxOutputPrice: 2 }).map(value => value.slot)).toEqual([1]);
+  expect(eligible({ offers: [{ ...offers[0], activeBookings: offers[0].capacity }] } as MarketModel, defaultSettings)).toEqual([]);
   expect(() => validateSettings({ minSpeed: -1 })).toThrow();
   expect(() => validateSettings({ dailyBudgetAtomic: "1" })).toThrow();
 });
@@ -39,7 +39,7 @@ test("request cost includes cached history only for its provider and respects ex
   const alternative = offer(1, 1000000, 100), model = { offers: [previous, alternative] } as MarketModel;
   const settings = { ...defaultSettings, mode: "cheapest" as const };
   const estimate = { input: 1000, cached: 900, output: 100, provider: previous.provider.wallet };
-  expect(rankOffers(eligible(model, settings, 1000, 1000), settings, estimate)[0].slot).toBe(0);
+  expect(rankOffers(eligible(model, settings), settings, estimate)[0].slot).toBe(0);
   expect(rankOffers(model.offers, settings, { ...estimate, provider: "missing" })[0].slot).toBe(1);
-  expect(rankOffers(eligible(model, { ...settings, maxInputPrice: 1 }, 1000, 1000), settings, estimate)[0].slot).toBe(1);
+  expect(rankOffers(eligible(model, { ...settings, maxInputPrice: 1 }), settings, estimate)[0].slot).toBe(1);
 });

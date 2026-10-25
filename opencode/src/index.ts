@@ -125,9 +125,9 @@ export default Plugin.define({
       } });
       return transport;
     }
-    const models = () => cfg ? (catalog?.models ?? []).filter(model => model.contextTokens && model.outputTokens && model.offers.some(offer => offer.active && offer.approved && offer.provider.approved)).map(model => {
+    const models = () => cfg ? (catalog?.models ?? []).filter(model => model.contextTokens && model.outputTokens && model.offers.some(offer => offer.active)).map(model => {
       const settings = client?.settings(model.id) ?? defaultSettings;
-      const price = rankOffers(eligible(model, settings, 0, 0), settings)[0];
+      const price = rankOffers(eligible(model, settings), settings)[0];
       return Model.Info.make({ ...Model.Info.default(providerID, Model.ID.make(model.id)), name: model.name,
         package: Provider.Package.make("@opencode/ai/providers/openai-compatible"),
         capabilities: { tools: model.capabilities?.tools === true, input: model.modalities.input, output: model.modalities.output },
@@ -213,7 +213,7 @@ export default Plugin.define({
         const modelId = (input as { model: string }).model, value = await requireClient(), model = value.catalog?.models.find(model => model.id === modelId);
         if (!model) throw Error("Fossa model unavailable.");
         const settings = value.settings(modelId);
-        return { id: model.id, name: model.name, settings, outputTokens: model.outputTokens, offers: rankOffers(eligible(model, settings, 0, 0), settings).map(offer => ({ provider: offer.provider.name, wallet: offer.provider.wallet, url: cfg!.opencode.deviceConnect === false ? "" : new URL(`/?provider=${encodeURIComponent(offer.provider.wallet)}`, cfg!.opencode.siteUrl).href, input: offer.inputRate / 1_000_000, cached: offer.cachedRate / 1_000_000, output: offer.outputRate / 1_000_000, speed: offer.speed, zdr: offer.private })) };
+        return { id: model.id, name: model.name, settings, outputTokens: model.outputTokens, offers: rankOffers(eligible(model, settings), settings).map(offer => ({ provider: offer.provider.name, wallet: offer.provider.wallet, url: cfg!.opencode.deviceConnect === false ? "" : new URL(`/?provider=${encodeURIComponent(offer.provider.wallet)}`, cfg!.opencode.siteUrl).href, input: offer.inputRate / 1_000_000, cached: offer.cachedRate / 1_000_000, output: offer.outputRate / 1_000_000, speed: offer.speed, zdr: offer.private })) };
       }),
       recover: guarded(async () => {
         const value = await requireClient(); return value.rakeback();
@@ -232,7 +232,7 @@ export default Plugin.define({
         const cached = (client?.status.connected ? client.catalog : undefined) ?? (catalog && Date.now() - catalogAt < (cfg?.opencode.catalogMaxAgeMs ?? 5000) ? catalog : undefined);
         const [nextConfig, next] = await Promise.all([cfg ? Promise.resolve(cfg) : config(apiUrl, controller.signal), cached ? Promise.resolve(cached) : api<Catalog>(apiUrl, "/market/catalog", { signal: controller.signal }).then(value => { catalogAt = Date.now(); return value; })]);
         if (closing || switching) return;
-        if (!Array.isArray(next?.models) || next.programId !== nextConfig.programId || next.market !== nextConfig.market) throw new FossaError("CONFIGURATION", "Fossa catalog does not match its protocol configuration.");
+        if (!Array.isArray(next?.models) || next.programId !== nextConfig.programId || next.market !== nextConfig.market || next.providerList !== nextConfig.providerList) throw new FossaError("CONFIGURATION", "Fossa catalog does not match its protocol configuration.");
         cfg = nextConfig; catalog = next; transport ??= startTransport(cfg); problem = undefined;
         const capabilities = JSON.stringify([cfg.opencode.deviceConnect, cfg.opencode.manualImport]);
         if (capabilities !== capabilitiesHash) { await ctx.integration.reload(); capabilitiesHash = capabilities; }

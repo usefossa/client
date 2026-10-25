@@ -2,7 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Keypair } from "@solana/web3.js";
+import { Keypair, PublicKey, Transaction, TransactionInstruction } from "@solana/web3.js";
 import bs58 from "bs58";
 import { signMessage } from "../src/signing";
 import { verifyMessage } from "./signing";
@@ -45,6 +45,26 @@ test("scoped journals preserve exact generations, alternate API recovery and unk
     expect(store.history("wallet", scope)).toHaveLength(3); expect(store.request("unknown-terminal", "wallet")?.charge).toBe("9");
     store.migrateJournal(); store.migrateJournal(); expect(store.request("legacy", "wallet")?.transaction).toBe("legacy bytes");
   } finally { store.close(); }
+});
+
+for (const count of [8, 9]) test(`journal migration preserves ${count}-account booking signatures and list binding`, async () => {
+  const directory = mkdtempSync(join(tmpdir(), "fossa-list-journal-")); directories.push(directory);
+  let store = new Store(directory);
+  const owner = await Keypair.generate(), keys = Array.from({ length: count }, (_, i) => ({ pubkey: new PublicKey(new Uint8Array(32).fill(i + 1)), isSigner: false, isWritable: i === 3 || i === 4 || i === 6 }));
+  keys[5] = { pubkey: owner.publicKey, isSigner: true, isWritable: false };
+  const program = new PublicKey(new Uint8Array(32).fill(20)), data = Buffer.alloc(116); data[0] = 6; data.writeBigUInt64LE(7n, 108);
+  const tx = new Transaction().add(new TransactionInstruction({ programId: program, keys, data }));
+  tx.feePayer = owner.publicKey; tx.recentBlockhash = program.toString() as typeof tx.recentBlockhash;
+  await tx.sign(owner);
+  const transaction = Buffer.from(await tx.serialize()).toString("base64"), signature = bs58.encode(tx.signatures[0].signature!);
+  store.put({ id: "old", wallet: owner.publicKey.toString(), booking: keys[6].pubkey.toString(), generation: "7", transaction, signature, stage: "uncertain", created: 1 } as Pending);
+  store.close(); store = new Store(directory);
+  try {
+    const saved = store.request("old", owner.publicKey.toString())!;
+    expect(saved.scope).toEqual({ program: program.toString(), market: keys[0].pubkey.toString(), lane: keys[4].pubkey.toString() });
+    expect(saved.providerList).toBe(count === 9 ? keys[8].pubkey.toString() : undefined);
+    expect(saved.transaction).toBe(transaction); expect(saved.signature).toBe(signature);
+  } finally { store.close(); owner.secretKey.fill(0); }
 });
 
 test("imported key remains able to sign after temporary input is zeroed", async () => {

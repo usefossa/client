@@ -11,8 +11,8 @@ for (const action of ["reload", "endpoint"]) for (const phase of ["booking", "st
   const symbol = Symbol.for("fossa.opencode.local-wallet-store"), cache = globalThis as Record<symbol, unknown>, previous = cache[symbol]; cache[symbol] = store;
   let enter!: () => void, release!: () => void;
   const entered = new Promise<void>(resolve => { enter = resolve; }), gate = new Promise<void>(resolve => { release = resolve; });
-  const cfg = { programId: owner.publicKey.toString(), market: owner.publicKey.toString(), usdcMint: owner.publicKey.toString(), opencode: { siteUrl: "http://127.0.0.1:3000", maxInputTokens: 1024, maxRequestBytes: 2200000, pollIntervalMs: 100 } };
-  const catalog = { ready: true, programId: cfg.programId, market: cfg.market, models: [{ id: "fixture/coder", outputTokens: 32 }] };
+  const cfg = { programId: owner.publicKey.toString(), market: owner.publicKey.toString(), providerList: owner.publicKey.toString(), usdcMint: owner.publicKey.toString(), opencode: { siteUrl: "http://127.0.0.1:3000", maxInputTokens: 1024, maxRequestBytes: 2200000, pollIntervalMs: 100 } };
+  const catalog = { ready: true, programId: cfg.programId, market: cfg.market, providerList: cfg.providerList, models: [{ id: "fixture/coder", outputTokens: 32 }] };
   const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(request) {
     const path = new URL(request.url).pathname;
     if (path.endsWith("/config")) return Response.json(cfg);

@@ -80,7 +80,7 @@ export class FossaClient {
     return this.refreshing ??= (async () => {
       const version = this.catalogVersion;
       const [catalog, wallet, history] = await Promise.all([api<Catalog>(this.account.apiUrl, "/market/catalog"), this.snapshot(), api<{ receipts: { booking: string; generation: string; charge: string }[] }>(this.account.apiUrl, "/opencode/receipts", { token: this.account.access })]);
-      if (catalog.programId !== this.cfg.programId || catalog.market !== this.cfg.market) throw new FossaError("MARKET_CHANGED", "Fossa protocol configuration changed. Reconnect before signing.");
+      if (catalog.programId !== this.cfg.programId || catalog.market !== this.cfg.market || catalog.providerList !== this.cfg.providerList) throw new FossaError("MARKET_CHANGED", "Fossa protocol configuration changed. Reconnect before signing.");
       this.updateCatalog(catalog, version);
       if (wallet.slot >= (this.wallet?.slot ?? 0)) { this.wallet = wallet; this.walletAt = Date.now(); }
       const rows = this.store.history(this.account.wallet, this.scope), byBooking = new Map(rows.map(row => [`${row.booking}:${row.generation}`, row]));
@@ -98,7 +98,7 @@ export class FossaClient {
     })().finally(() => { this.refreshing = undefined; });
   }
   private updateCatalog(catalog: Catalog, version = this.catalogVersion) {
-    if (catalog.programId !== this.cfg.programId || catalog.market !== this.cfg.market) throw new FossaError("MARKET_CHANGED", "Fossa protocol configuration changed. Reconnect before signing.");
+    if (catalog.programId !== this.cfg.programId || catalog.market !== this.cfg.market || catalog.providerList !== this.cfg.providerList) throw new FossaError("MARKET_CHANGED", "Fossa protocol configuration changed. Reconnect before signing.");
     if (this.catalog && (catalog.slot < this.catalog.slot || version !== this.catalogVersion && catalog.slot === this.catalog.slot)) return;
     this.catalog = catalog; this.catalogAt = Date.now();
     this.catalogVersion++;
@@ -305,9 +305,9 @@ export class FossaClient {
       try { const row = await this.journal(tx, [owner, booking], { id: randomUUID(), wallet: this.account.wallet, model: "", bodyHash: "", session: "", kind: "setup", booking: address, generation: "0", reserve: "0" }, rent, signal); const slot = await this.processed(row); row.processedSlot = slot; row.stage = "settled"; this.store.put(row); this.wallet = await this.snapshot(slot); } finally { booking.secretKey.fill(0); }
     }
   }
-  private inspect(info: AccountInfo<Uint8Array>, row: Pending, model: MarketModel) {
+  private inspect(info: AccountInfo<Uint8Array>, row: Pending, model: Pick<MarketModel, "address">) {
     const data = Buffer.from(info.data);
-    if (!info.owner.equals(new PublicKey(this.cfg.programId)) || data.length !== 368 || data.subarray(0, 8).toString() !== "BOOK0V20" || !data.subarray(8, 40).equals(new PublicKey(this.account.wallet).toBytes()) || !data.subarray(72, 104).equals(new PublicKey(this.cfg.market).toBytes()) || !data.subarray(192, 224).equals(new PublicKey(this.account.lane).toBytes()) || !data.subarray(224, 256).equals(new PublicKey(model.address).toBytes()) || data.readBigUInt64LE(152).toString() !== row.generation) throw new FossaError("BOOKING_CHANGED", "Booking identity or generation changed. Reconcile before retrying.");
+    if (!info.owner.equals(new PublicKey(this.cfg.programId)) || data.length !== 368 || data.subarray(0, 8).toString() !== "BOOK0V20" || !data.subarray(8, 40).equals(new PublicKey(this.account.wallet).toBytes()) || !data.subarray(72, 104).equals(new PublicKey(this.cfg.market).toBytes()) || !data.subarray(192, 224).equals(new PublicKey(this.account.lane).toBytes()) || !data.subarray(224, 256).equals(new PublicKey(model.address).toBytes()) || data.readBigUInt64LE(152).toString() !== row.generation || row.providerList && !data.subarray(320, 352).equals(new PublicKey(row.providerList).toBytes())) throw new FossaError("BOOKING_CHANGED", "Booking identity or generation changed. Reconcile before retrying.");
     return data;
   }
   private async rakebackFunds(): Promise<RakebackFunds> {
@@ -364,9 +364,11 @@ export class FossaClient {
         const provider = new PublicKey(data.subarray(40, 72)).toString();
         const model = this.catalog?.models.find(model => model.id === row.model);
         const offer = model?.offers.find(offer => offer.provider.wallet === provider && offer.slot === data.readUInt32LE(352));
-        if (model && offer?.provider.endpoint) {
-          this.inspect(info, row, model);
-          this.store.put({ ...row, provider, endpoint: safeUrl(offer.provider.endpoint) });
+        const endpoint = row.provider === provider && row.endpoint ? row.endpoint : offer?.provider.endpoint;
+        if (endpoint) {
+          const address = model?.address ?? (await PublicKey.findProgramAddress([Buffer.from("model"), new PublicKey(this.cfg.market).toBytes(), createHash("sha256").update(row.model).digest()], new PublicKey(this.cfg.programId)))[0].toString();
+          this.inspect(info, row, { address });
+          this.store.put({ ...row, provider, endpoint: safeUrl(endpoint) });
           await this.cancel(row.id).catch(() => {});
         }
       }
@@ -496,19 +498,19 @@ export class FossaClient {
       const cached = prior ? Math.min(estimatedInput, prior.usage!.input + (continued ? prior.usage!.output : 0), Math.ceil(Buffer.byteLength(JSON.stringify(parsed.messages.slice(0, Math.max(prior.cache!.messages, parsed.messages.length - 1)))) / 4)) : 0;
       const estimate = { input: estimatedInput, cached, output: estimatedOutput, provider: prior?.provider };
       const settings = this.settings(modelId);
-      let ranked = rankOffers(eligible(model, settings, maxInput, maxOutput), settings, estimate);
+      let ranked = rankOffers(eligible(model, settings), settings, estimate);
       const admissionAt = Date.now(), admissionDeadline = admissionAt + this.cfg.opencode.requestTimeoutMs;
       let refresh = true;
-      while (!ranked.length && settling(model, settings, maxInput, maxOutput) && Date.now() < admissionDeadline) {
+      while (!ranked.length && settling(model, settings) && Date.now() < admissionDeadline) {
         signal.throwIfAborted();
         if (this.stopped) throw new FossaError("FOSSA_STOPPED", "Fossa connection closed.");
-        this.progress(callId, { stage: "settling", message: "Waiting for provider settlement…" });
+        this.progress(callId, { stage: "settling", message: "Waiting for provider capacity…" });
         if (refresh) { const version = this.catalogVersion; this.updateCatalog(await api<Catalog>(this.account.apiUrl, "/market/catalog", { signal }), version); }
         model = this.catalog.models.find(value => value.id === modelId);
         if (!model) throw new FossaError("MODEL_UNAVAILABLE", "Selected Fossa model is unavailable.");
         if (maxInput > Math.min(model.inputBoundTokens ?? model.contextTokens ?? 0, this.cfg.opencode.maxInputTokens) || maxOutput > (model.outputTokens ?? 0)) throw new FossaError("TOKEN_LIMIT", "Request exceeds updated model token bounds.");
-        ranked = rankOffers(eligible(model, settings, maxInput, maxOutput), settings, estimate);
-        if (!ranked.length && settling(model, settings, maxInput, maxOutput)) refresh = !await this.waitForCatalog(signal, admissionDeadline);
+        ranked = rankOffers(eligible(model, settings), settings, estimate);
+        if (!ranked.length && settling(model, settings)) refresh = !await this.waitForCatalog(signal, admissionDeadline);
       }
       signal.throwIfAborted();
       if (this.stopped) throw new FossaError("FOSSA_STOPPED", "Fossa connection closed.");
@@ -546,14 +548,15 @@ export class FossaClient {
           const generation = (BigInt(wallet.generation) > BigInt(free.generation) ? BigInt(wallet.generation) : BigInt(free.generation)) + 1n;
           const deposit = reserve > BigInt(wallet.freeAtomic) ? reserve - BigInt(wallet.freeAtomic) : 0n;
           const program = new PublicKey(this.cfg.programId), market = new PublicKey(this.cfg.market), lane = new PublicKey(this.account.lane), mint = new PublicKey(this.cfg.usdcMint);
-          const tx = new Transaction().add(ComputeBudgetProgram.setComputeUnitLimit({ units: Math.min(1_400_000, (deposit ? 12_000 : 10_000) + model.offers.length * 200) }));
+          if (!Number.isSafeInteger(model.offerCount) || model.offerCount < model.offers.length || model.offerCount > 4096) throw new FossaError("CONFIGURATION", "Fossa model book size is invalid.");
+          const tx = new Transaction().add(ComputeBudgetProgram.setComputeUnitLimit({ units: Math.min(1_400_000, 20_000 + model.offerCount * 500) }));
           if (deposit) { const amount = Buffer.alloc(8); amount.writeBigUInt64LE(deposit); tx.add(ix(program, 3, amount, [meta(market), meta(lane, true), meta(owner.publicKey, false, true), meta(new PublicKey(wallet.source), true), meta(new PublicKey(wallet.vault), true), meta(mint), meta(TOKEN_PROGRAM_ID)])); }
           const payload = Buffer.alloc(115); createHash("sha256").update(modelId).digest().copy(payload);
           priceFields.forEach((field, index) => payload.writeUInt32LE(settings[field] === undefined ? 0xffffffff : Math.floor(settings[field]! * 1_000_000), 32 + index * 4));
           payload.writeUInt16LE(minSpeed, 44); payload.writeUInt32LE(maxInput, 46); payload.writeUInt32LE(maxOutput, 50); payload[54] = settings.zdrOnly ? 1 : 0;
           payload.writeBigUInt64LE(reserve, 55); payload.writeUInt32LE(estimatedInput, 63); payload.writeUInt32LE(cached, 67); payload.writeUInt32LE(estimatedOutput, 71); payload.writeBigUInt64LE(generation, 107);
           if (prior) Buffer.from(new PublicKey(prior.provider!).toBytes()).copy(payload, 75);
-          tx.add(ix(program, 6, payload, [meta(market), meta(new PublicKey(model.address)), meta(new PublicKey(model.terms)), meta(new PublicKey(model.capacity), true), meta(lane, true), meta(owner.publicKey, false, true), meta(new PublicKey(free.address), true), meta(new PublicKey(free.rentPayer))]));
+          tx.add(ix(program, 6, payload, [meta(market), meta(new PublicKey(model.address)), meta(new PublicKey(model.terms)), meta(new PublicKey(model.capacity), true), meta(lane, true), meta(owner.publicKey, false, true), meta(new PublicKey(free.address), true), meta(new PublicKey(free.rentPayer)), meta(new PublicKey(this.cfg.providerList))]));
           this.progress(callId, { stage: "booking", message: `Preparing transaction · reserving up to ${atomic(reserve)} USDC…`, booking: free.address }); signal.throwIfAborted();
           let observed: { info: AccountInfo<Uint8Array>; slot: number; source: "stream" | "rpc" } | undefined, wake!: (slot: number) => void;
           const changed = new Promise<number>(resolve => { wake = resolve; });
@@ -562,7 +565,7 @@ export class FossaClient {
           if (this.socket?.readyState === WebSocket.OPEN) this.socket.send(JSON.stringify({ watch: free.address }));
           let row: Pending, slot: number, info: AccountInfo<Uint8Array> | null;
           try {
-            row = await this.journal(tx, [owner], { id: callId, wallet: this.account.wallet, model: modelId, bodyHash: hash, cache: { messages: parsed.messages.length, prefix: prefix(parsed.messages.length) }, session, kind: "inference", flow: kind, booking: free.address, generation: generation.toString(), reserve: reserve.toString(), deposit: deposit.toString(), startedAt, ...requestTiming, walletLockMs, recoveryWaitMs, admissionWaitMs, bookingPoolWaitMs }, 0, signal);
+            row = await this.journal(tx, [owner], { id: callId, wallet: this.account.wallet, model: modelId, bodyHash: hash, providerList: this.cfg.providerList, cache: { messages: parsed.messages.length, prefix: prefix(parsed.messages.length) }, session, kind: "inference", flow: kind, booking: free.address, generation: generation.toString(), reserve: reserve.toString(), deposit: deposit.toString(), startedAt, ...requestTiming, walletLockMs, recoveryWaitMs, admissionWaitMs, bookingPoolWaitMs }, 0, signal);
             slot = await this.processed(row, signal, changed);
             row.processedSlot = slot; this.store.put(row);
             this.progress(callId, { stage: "matched", message: "Transaction confirmed · matching provider…" });

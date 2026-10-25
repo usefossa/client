@@ -25,29 +25,20 @@ export function rankOffers(offers: Offer[], settings: Settings, estimate?: Routi
   return [...offers].sort((a, b) => (settings.mode === "fastest" ? b.speed - a.speed : settings.mode === "balanced" ? score(a) - score(b) : 0) || cost(a) - cost(b) || b.speed - a.speed || a.slot - b.slot);
 }
 export const fee = (tokens: number, rate: number) => (BigInt(tokens) * BigInt(rate) + 999999n) / 1000000n;
-const matches = (offer: Offer, settings: Settings) => offer.active && offer.approved && offer.provider.approved && offer.speed >= settings.minSpeed && (!settings.zdrOnly || offer.private) && !!offer.provider.endpoint
+const matches = (offer: Offer, settings: Settings) => offer.active && offer.speed >= settings.minSpeed && (!settings.zdrOnly || offer.private) && !!offer.provider.endpoint
   && [offer.inputRate, offer.cachedRate, offer.outputRate].every((rate, index) => settings[priceFields[index]] === undefined || rate <= Math.floor(settings[priceFields[index]]! * 1_000_000));
-export function eligible(model: MarketModel, settings: Settings, input: number, output: number) {
-  return model.offers.filter(offer => {
-    if (!offer.available || !matches(offer, settings)) return false;
-    const exposure = BigInt(offer.exposure) + fee(input, offer.inputRate) + fee(output, offer.outputRate) + 1n;
-    return BigInt(offer.fundedBond) >= exposure + (exposure + 99n) / 100n;
-  });
+export function eligible(model: MarketModel, settings: Settings) {
+  return model.offers.filter(offer => offer.available && offer.activeBookings < offer.capacity && matches(offer, settings));
 }
 
-export function settling(model: MarketModel, settings: Settings, input: number, output: number) {
-  return model.offers.some(offer => {
-    if (!matches(offer, settings) || !offer.activeBookings) return false;
-    const reserve = fee(input, offer.inputRate) + fee(output, offer.outputRate) + 1n;
-    return BigInt(offer.fundedBond) >= reserve + (reserve + 99n) / 100n;
-  });
+export function settling(model: MarketModel, settings: Settings) {
+  return model.offers.some(offer => matches(offer, settings) && offer.activeBookings > 0);
 }
 
 export function unavailable(model: MarketModel, settings: Settings, input: number, output: number) {
-  const offers = model.offers.filter(offer => matches(offer, settings)).map(offer => ({ provider: offer.provider.name, fundedBond: offer.fundedBond, exposure: offer.exposure, activeBookings: offer.activeBookings, capacity: offer.capacity, reserve: (fee(input, offer.inputRate) + fee(output, offer.outputRate) + 1n).toString() }));
+  const offers = model.offers.filter(offer => matches(offer, settings)).map(offer => ({ provider: offer.provider.name, activeBookings: offer.activeBookings, capacity: offer.capacity, reserve: (fee(input, offer.inputRate) + fee(output, offer.outputRate) + 1n).toString() }));
   const message = !offers.length ? "No provider matches this model’s price, speed, and data retention filters."
     : offers.every(offer => offer.activeBookings >= offer.capacity) ? "Matching providers are busy. Try again when a current request finishes."
-    : offers.every(offer => { const reserve = BigInt(offer.reserve); return BigInt(offer.fundedBond) < reserve + (reserve + 99n) / 100n; }) ? "This request needs more provider collateral than any matching provider has. Reduce context or choose another model."
-    : "Provider collateral is currently tied up in reservations or unsettled usage. Try again shortly; adding funds to your wallet will not fix this.";
+    : "Matching providers are unavailable. Try again shortly.";
   return { message, data: { input, output, settings, offers } };
 }

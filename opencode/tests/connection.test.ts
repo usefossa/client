@@ -18,7 +18,7 @@ test("native live connection authenticates, restores watches, reconnects, and st
     message(socket, data) { if (JSON.parse(String(data)).watch === "fixture-booking") { messages++; if (connections === 1) socket.close(); } },
   } });
   const client = new FossaClient(store, { walletId: "fixture", wallet: "fixture", lane: "fixture", apiUrl: server.url.origin, name: "Fixture", access: "fixture-access", refresh: "fixture-refresh", expires: 0 }, () => {});
-  client.cfg = { programId: "fixture", market: "fixture", usdcMint: "fixture", solanaRpc: "", opencode: { siteUrl: "https://example.invalid", deviceTtlSecs: 60, maxInputTokens: 1024, maxRequestBytes: 2200000, catalogMaxAgeMs: 5000, requestTimeoutMs: 1000, pollIntervalMs: 5, mainnetGenesisHash: "fixture", localBookingPoolSize: 1 } };
+  client.cfg = { programId: "fixture", market: "fixture", providerList: "fixture", usdcMint: "fixture", solanaRpc: "", opencode: { siteUrl: "https://example.invalid", deviceTtlSecs: 60, maxInputTokens: 1024, maxRequestBytes: 2200000, catalogMaxAgeMs: 5000, requestTimeoutMs: 1000, pollIntervalMs: 5, mainnetGenesisHash: "fixture", localBookingPoolSize: 1 } };
   try {
     client["watchers"].set("fixture-booking", () => {}); client["connect"]();
     const deadline = Date.now() + 2000; while (messages < 2 && Date.now() < deadline) await Bun.sleep(5);

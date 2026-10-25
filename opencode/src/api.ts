@@ -28,7 +28,7 @@ export async function api<T>(base: string, path: string, options: { token?: stri
 }
 export async function config(base: string, signal?: AbortSignal) {
   const value = await api<PublicConfig>(base, "/config", { signal });
-  if (!value?.programId || !value.market || !value.usdcMint || !value.opencode || !Number.isSafeInteger(value.opencode.maxInputTokens)) throw new FossaError("CONFIGURATION", "Fossa API does not support this plugin version.");
+  if (!value?.programId || !value.market || !value.providerList || !value.usdcMint || !value.opencode || !Number.isSafeInteger(value.opencode.maxInputTokens)) throw new FossaError("CONFIGURATION", "Fossa API does not support this plugin version.");
   safeUrl(value.opencode.siteUrl, "website"); return value;
 }
 export async function refreshAccount(account: Account) {

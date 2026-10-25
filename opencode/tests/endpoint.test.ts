@@ -10,11 +10,11 @@ test("API setting persists, rejects unsafe endpoints, and isolates old credentia
   const methods = new Map<string, unknown>(); let transform: ((editor: unknown) => void) | undefined;
   const editor = { update: () => {}, method: { remove: (_: unknown, method: { id?: string }) => { if (method.id) methods.delete(method.id); }, update: (value: { method: { id: string } }) => methods.set(value.method.id, value) } };
   const preferences = new Map<string, unknown>(), requests: { path: string; authorization: string | null }[] = [];
-  const config = { programId: "11111111111111111111111111111111", market: "11111111111111111111111111111111", usdcMint: "11111111111111111111111111111111", opencode: { siteUrl: "https://example.invalid", maxInputTokens: 1024, maxRequestBytes: 2200000, pollIntervalMs: 10, catalogMaxAgeMs: 5000 } };
+  const config = { programId: "11111111111111111111111111111111", market: "11111111111111111111111111111111", providerList: "11111111111111111111111111111111", usdcMint: "11111111111111111111111111111111", opencode: { siteUrl: "https://example.invalid", maxInputTokens: 1024, maxRequestBytes: 2200000, pollIntervalMs: 10, catalogMaxAgeMs: 5000 } };
   const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(request) {
     const path = new URL(request.url).pathname; requests.push({ path, authorization: request.headers.get("authorization") });
     if (path.startsWith("/bad/")) return Response.json({});
-    return Response.json(path.endsWith("/config") ? { ...config, opencode: { ...config.opencode, ...(path.startsWith("/alternate/") ? { deviceConnect: false, manualImport: true } : path.startsWith("/disabled/") ? { deviceConnect: true, manualImport: false } : {}) } } : { ready: true, programId: config.programId, market: config.market, models: [] });
+    return Response.json(path.endsWith("/config") ? { ...config, opencode: { ...config.opencode, ...(path.startsWith("/alternate/") ? { deviceConnect: false, manualImport: true } : path.startsWith("/disabled/") ? { deviceConnect: true, manualImport: false } : {}) } } : { ready: true, programId: config.programId, market: config.market, providerList: config.providerList, models: [] });
   } });
   let credential: unknown, handlers: Record<string, (input: unknown, context?: unknown) => Promise<any>> = {}, stop: (() => Promise<void>) | undefined;
   const errors = { error: (_: string, message: string) => { throw Error(message); } };

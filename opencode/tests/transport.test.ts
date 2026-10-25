@@ -9,12 +9,12 @@ import { Store, type Pending } from "../src/store";
 test("transport bounds every provider error and preserves uncertain payment recovery", async () => {
   const directory = mkdtempSync(join(tmpdir(), "fossa-error-transport-")), store = new Store(directory), owner = await Keypair.generate();
   const symbol = Symbol.for("fossa.opencode.local-wallet-store"), cache = globalThis as Record<symbol, unknown>, previous = cache[symbol]; cache[symbol] = store;
-  const cfg = { programId: owner.publicKey.toString(), market: owner.publicKey.toString(), usdcMint: owner.publicKey.toString(), opencode: { siteUrl: "https://example.invalid", maxInputTokens: 1024, maxRequestBytes: 2200000, pollIntervalMs: 100, catalogMaxAgeMs: 5000 } };
+  const cfg = { programId: owner.publicKey.toString(), market: owner.publicKey.toString(), providerList: owner.publicKey.toString(), usdcMint: owner.publicKey.toString(), opencode: { siteUrl: "https://example.invalid", maxInputTokens: 1024, maxRequestBytes: 2200000, pollIntervalMs: 100, catalogMaxAgeMs: 5000 } };
   let status = 500, oversized = false;
   const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(request) {
     const path = new URL(request.url).pathname;
     if (path.endsWith("/config")) return Response.json(cfg);
-    if (path.endsWith("/catalog")) return Response.json({ ready: true, programId: cfg.programId, market: cfg.market, models: [{ id: "fixture/coder", outputTokens: 32 }] });
+    if (path.endsWith("/catalog")) return Response.json({ ready: true, programId: cfg.programId, market: cfg.market, providerList: cfg.providerList, models: [{ id: "fixture/coder", outputTokens: 32 }] });
     return new Response(oversized ? "x".repeat(65_537) : JSON.stringify({ error: { message: "Try later", code: "unavailable" } }), { status, headers: { "content-type": "application/json", "retry-after": "5" } });
   } });
   const account = { walletId: "fixture", wallet: owner.publicKey.toString(), lane: owner.publicKey.toString(), name: "Fixture", apiUrl: server.url.origin, access: "fixture", refresh: "fixture", expires: Date.now() + 60000 };

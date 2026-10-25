@@ -9,10 +9,10 @@ test("early status failure cannot poison activation after the backend becomes re
   const directory = mkdtempSync(join(tmpdir(), "fossa-startup-")), store = new Store(directory);
   const symbol = Symbol.for("fossa.opencode.local-wallet-store"), cache = globalThis as Record<symbol, unknown>, previous = cache[symbol]; cache[symbol] = store;
   let ready!: () => void; const gate = new Promise<void>(resolve => { ready = resolve; });
-  const config = { programId: "11111111111111111111111111111111", market: "11111111111111111111111111111111", usdcMint: "11111111111111111111111111111111", opencode: { siteUrl: "http://127.0.0.1:3000", maxInputTokens: 65536, maxRequestBytes: 2200000, pollIntervalMs: 20 } };
+  const config = { programId: "11111111111111111111111111111111", market: "11111111111111111111111111111111", providerList: "11111111111111111111111111111111", usdcMint: "11111111111111111111111111111111", opencode: { siteUrl: "http://127.0.0.1:3000", maxInputTokens: 65536, maxRequestBytes: 2200000, pollIntervalMs: 20 } };
   const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
     if (new URL(request.url).pathname.endsWith("/config")) { await gate; return Response.json(config); }
-    return Response.json({ ready: true, slot: 1, programId: config.programId, market: config.market, models: [] });
+    return Response.json({ ready: true, slot: 1, programId: config.programId, market: config.market, providerList: config.providerList, models: [] });
   } });
   let handlers: Record<string, (input: unknown) => Promise<any>> = {}, reloads = 0, stop: (() => Promise<void>) | undefined;
   const methods: { id: string; form?: { key: string }[] }[] = [];

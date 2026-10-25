@@ -31,9 +31,6 @@ async function fixture(customError = 2, retries = 0) {
   const sockets = new Set<import("bun").ServerWebSocket<SocketData>>();
   const records = new Map([[source.toString(), { data: tokenData, owner: TOKEN_PROGRAM_ID }], [lane.publicKey.toString(), { data: userData, owner: program }], [booking.publicKey.toString(), { data: bookData, owner: program }]]);
   records.set(model.toString(), { data: modelData, owner: program });
-  const receipt = Buffer.alloc(736); receipt.write("RECEIPT1"); Buffer.from(market.toBytes()).copy(receipt, 8); Buffer.from(model.toBytes()).copy(receipt, 40); Buffer.from(provider.publicKey.toBytes()).copy(receipt, 72);
-  receipt.writeBigInt64LE(BigInt(Math.floor(Date.now() / 1000) - 10), 176); receipt.writeBigInt64LE(BigInt(Math.floor(Date.now() / 1000) + 1800), 184);
-  records.set((await Keypair.generate()).publicKey.toString(), { data: receipt, owner: program });
   let cfg: PublicConfig, catalog: Catalog, providerServer: Awaited<ReturnType<typeof rustProvider>>;
   const server = Bun.serve<SocketData>({ hostname: "127.0.0.1", port: 0, websocket: {
     async open(socket) {
@@ -56,7 +53,7 @@ async function fixture(customError = 2, retries = 0) {
     if (url.pathname === "/v1/opencode/live" && server.upgrade(request, { data: { subscribed: false, live: true } })) return;
     if (url.pathname === "/v1/config") return json(cfg);
     if (url.pathname === "/v1/market/catalog") { catalogReads++; return json(catalog); }
-    if (url.pathname === "/v1/opencode/receipts") return json({ receipts: bookData[148] === 5 ? store.pending(owner.publicKey.toString()).filter(row => row.generation === bookData.readBigUInt64LE(152).toString()).map(row => ({ booking: row.booking, generation: row.generation, charge: "0" })) : [] });
+    if (url.pathname === "/v1/opencode/receipts") return json({ receipts: bookData[148] === 5 ? store.pending(owner.publicKey.toString()).filter(row => row.generation === bookData.readBigUInt64LE(152).toString()).map(row => ({ booking: row.booking, generation: row.generation, charge: bookData.readBigUInt64LE(160).toString() })) : [] });
     if (url.pathname === "/upstream/chat/completions") {
       const body = await request.json() as { model: string };
       const chunk = { id: "fixture", object: "chat.completion.chunk", created: 1, model: body.model, choices: [{ index: 0, delta: { content: "Hello" }, finish_reason: "stop" }], usage: { prompt_tokens: 20, completion_tokens: 8, prompt_tokens_details: { cached_tokens: 0 }, total_tokens: 28 } };
@@ -72,7 +69,7 @@ async function fixture(customError = 2, retries = 0) {
     else if (body.method === "getSignatureStatuses") result = { context: { slot: 100 }, value: body.params[0].map((value: string) => !hideStatus && (confirmedSignatures.has(value) || failures.has(value)) ? { slot: 100, confirmations: 1, confirmationStatus: "confirmed", err: failures.has(value) ? { InstructionError: [1, { Custom: customError }] } : null } : null) };
     else if (body.method === "getProgramAccounts") {
       const options = body.params[1];
-      expect(options.commitment).toBe(options.filters.some((filter: { dataSize?: number; memcmp?: { offset: number; bytes: string } }) => filter.dataSize === 736 || filter.memcmp?.offset === 0 && Buffer.from(bs58.decode(filter.memcmp.bytes)).toString() === "BOOK0V20") ? "processed" : "confirmed");
+      expect(options.commitment).toBe(options.filters.some((filter: { dataSize?: number; memcmp?: { offset: number; bytes: string } }) => filter.memcmp?.offset === 0 && Buffer.from(bs58.decode(filter.memcmp.bytes)).toString() === "BOOK0V20") ? "processed" : "confirmed");
       expect(options.withContext).toBe(true);
       expect(Number(options.minContextSlot ?? 0)).toBeLessThanOrEqual(100);
       result = { context: { slot: 100 }, value: [...records].filter(([, value]) => value.owner.toString() === body.params[0] && options.filters.every((filter: { dataSize?: number; memcmp?: { offset: number; bytes: string } }) => filter.dataSize === undefined ? filter.memcmp && value.data.subarray(filter.memcmp.offset, filter.memcmp.offset + bs58.decode(filter.memcmp.bytes).length).equals(bs58.decode(filter.memcmp.bytes)) : value.data.length === filter.dataSize)).map(([pubkey, value]) => ({ pubkey, account: { data: [value.data.toString("base64"), "base64"], owner: value.owner.toString(), lamports: 1000, executable: false, rentEpoch: 0 } })) };
@@ -92,6 +89,11 @@ async function fixture(customError = 2, retries = 0) {
       const instruction = tx.instructions.find(value => value.programId.equals(program) && value.data[0] === 6)!;
       if (instruction.keys[6].pubkey.toString() === deleted) { failures.add(signature); return json({ jsonrpc: "2.0", id: body.id, result: signature }); }
       expect(instruction.data.length).toBe(116);
+      expect(Buffer.from(tx.instructions[0].data).readUInt32LE(1)).toBe(20_000 + catalog.models[0].offerCount * 500);
+      expect(instruction.keys).toHaveLength(9);
+      expect(instruction.keys[8].pubkey.toString()).toBe(cfg.providerList);
+      expect(instruction.keys[8].isWritable).toBe(false);
+      expect(instruction.keys[8].isSigner).toBe(false);
       const payload = Buffer.from(instruction.data.subarray(1));
       const target = records.get(instruction.keys[6].pubkey.toString())!.data;
       const matched = catalog.models[0].offers.find(offer => offer.inputRate <= payload.readUInt32LE(32) && offer.cachedRate <= payload.readUInt32LE(36) && offer.outputRate <= payload.readUInt32LE(40) && offer.speed >= payload.readUInt16LE(44) && (!payload[54] || offer.private));
@@ -99,6 +101,7 @@ async function fixture(customError = 2, retries = 0) {
       const depositInstruction = tx.instructions.find(value => value.programId.equals(program) && value.data[0] === 3), deposit = depositInstruction ? Buffer.from(depositInstruction.data).readBigUInt64LE(1) : 0n;
       tokenData.writeBigUInt64LE(tokenData.readBigUInt64LE(64) - deposit, 64);
       userData.writeBigUInt64LE(userData.readBigUInt64LE(72) + deposit - payload.readBigUInt64LE(55), 72);
+      Buffer.from(new PublicKey(cfg.providerList).toBytes()).copy(target, 320);
       Buffer.from(model.toBytes()).copy(target, 224); Buffer.from(new PublicKey(matched.provider.wallet).toBytes()).copy(target, 40); payload.subarray(107, 115).copy(target, 152); payload.subarray(55, 63).copy(target, 104); payload.subarray(46, 50).copy(target, 124); payload.subarray(50, 54).copy(target, 128); target.writeBigInt64LE(BigInt(Math.floor(Date.now() / 1000) + 300 + Math.ceil(payload.readUInt32LE(50) / matched.speed)), 132); target[148] = 0; target.copy(userData, 113, 152, 159); target.writeUInt32LE(matched.slot, 352);
       for (const socket of sockets) if (socket.data.subscribed) socket.send(JSON.stringify({ jsonrpc: "2.0", method: "accountNotification", params: { subscription: 1, result: { context: { slot: 100 }, value: { data: [target.toString("base64"), "base64"], owner: program.toString(), lamports: 1000, executable: false, rentEpoch: 0 } } } }));
       for (const socket of sockets) if (socket.data.live && socket.data.watch === instruction.keys[6].pubkey.toString()) socket.send(JSON.stringify({ type: "booking", address: socket.data.watch, data: { owner: program.toString(), data: target.toString("base64"), slot: 100 } }));
@@ -107,8 +110,8 @@ async function fixture(customError = 2, retries = 0) {
     } else throw Error(`Unexpected fixture RPC ${body.method}`);
     return json({ jsonrpc: "2.0", id: body.id, result });
   } });
-  cfg = { programId: program.toString(), market: market.toString(), usdcMint: mint.toString(), solanaRpc: server.url.origin + "/rpc", opencode: { siteUrl: server.url.origin, deviceTtlSecs: 60, maxInputTokens: 65536, maxRequestBytes: 2_200_000, catalogMaxAgeMs: 30_000, requestTimeoutMs: 5000, pollIntervalMs: 100, mainnetGenesisHash: "fixture-mainnet-genesis", localBookingPoolSize: 2 } };
-  catalog = { ready: true, slot: 100, programId: cfg.programId, market: cfg.market, models: [{ id: "fixture/coder", address: model.toString(), name: "Fixture coder", terms: (await Keypair.generate()).publicKey.toString(), capacity: (await Keypair.generate()).publicKey.toString(), contextTokens: 65536, outputTokens: 8192, capabilities: { tools: true, reasoning: true }, modalities: { input: ["text"], output: ["text"] }, offers: [{ slot: 0, provider: { wallet: provider.publicKey.toString(), name: "Fixture provider", endpoint: server.url.origin + "/v1/chat/completions", approved: true }, inputRate: 500000, cachedRate: 40000, outputRate: 2000000, speed: 100, available: true, approved: true, active: true, private: false, fundedBond: "100000000", exposure: "0", capacity: 10, activeBookings: 0 }] }] };
+  cfg = { programId: program.toString(), market: market.toString(), providerList: (await Keypair.generate()).publicKey.toString(), usdcMint: mint.toString(), solanaRpc: server.url.origin + "/rpc", opencode: { siteUrl: server.url.origin, deviceTtlSecs: 60, maxInputTokens: 65536, maxRequestBytes: 2_200_000, catalogMaxAgeMs: 30_000, requestTimeoutMs: 5000, pollIntervalMs: 100, mainnetGenesisHash: "fixture-mainnet-genesis", localBookingPoolSize: 2 } };
+  catalog = { ready: true, slot: 100, programId: cfg.programId, market: cfg.market, providerList: cfg.providerList, models: [{ id: "fixture/coder", address: model.toString(), name: "Fixture coder", terms: (await Keypair.generate()).publicKey.toString(), capacity: (await Keypair.generate()).publicKey.toString(), contextTokens: 65536, outputTokens: 8192, capabilities: { tools: true, reasoning: true }, modalities: { input: ["text"], output: ["text"] }, offerCount: 64, offers: [{ slot: 0, provider: { wallet: provider.publicKey.toString(), name: "Fixture provider", endpoint: server.url.origin + "/v1/chat/completions" }, inputRate: 500000, cachedRate: 40000, outputRate: 2000000, speed: 100, available: true, active: true, private: false, capacity: 10, activeBookings: 0 }] }] };
   let providerStream: ReturnType<typeof Bun.serve>;
   try { providerStream = Bun.serve({ hostname: "127.0.0.1", port: Number(server.port) + 1, fetch(request, socket) { if (socket.upgrade(request, { data: undefined })) return; return new Response(null, { status: 400 }); }, websocket: { message(socket, message) { const request = JSON.parse(String(message)); socket.send(JSON.stringify({ jsonrpc: "2.0", id: request.id, result: request.method.endsWith("Unsubscribe") ? true : request.id })); } } }); }
   catch (error) { server.stop(true); store.close(); rmSync(directory, { recursive: true, force: true }); if ((error as { code?: string }).code === "EADDRINUSE" && retries < 10) return fixture(customError, retries + 1); throw error; }
@@ -129,10 +132,10 @@ async function fixture(customError = 2, retries = 0) {
     submissions: () => submitted, hideStatus: () => { hideStatus = true; }, loseResponse: () => { lostFirst = true; }, close: async () => { client.stop(); await providerServer.close(); await Bun.sleep(600); store.close(); server.stop(true); providerStream.stop(true); owner.secretKey.fill(0); provider.secretKey.fill(0); rmSync(directory, { recursive: true, force: true }); } };
 }
 
-for (const streamed of [true, false]) providerTest(`settlement admission resumes from ${streamed ? "live catalog" : "HTTP fallback"} without another payment`, async () => {
+for (const streamed of [true, false]) providerTest(`capacity admission resumes from ${streamed ? "live catalog" : "HTTP fallback"} without another payment`, async () => {
   const f = await fixture(), model = f.catalog.models[0], offer = model.offers[0];
   const body = JSON.stringify({ model: model.id, messages: [{ role: "user", content: "Hello" }], max_tokens: 128 });
-  Object.assign(offer, { fundedBond: "1000", exposure: "900", activeBookings: 1 });
+  Object.assign(offer, { activeBookings: 10 });
   await f.client.refresh();
   try {
     const pending = f.client.request("settlement", model.id, body, "session", "primary", new AbortController().signal);
@@ -140,7 +143,7 @@ for (const streamed of [true, false]) providerTest(`settlement admission resumes
     while (!f.client["catalogWaiters"].size && Date.now() < deadline) await Bun.sleep(1);
     expect(f.client["catalogWaiters"].size).toBe(1);
     expect(f.submissions()).toBe(0); expect(f.store.pending(f.account.wallet)).toHaveLength(0);
-    Object.assign(offer, { exposure: "100", activeBookings: 0 }); f.catalog.slot++;
+    Object.assign(offer, { activeBookings: 0 }); f.catalog.slot++;
     if (streamed) f.publishCatalog();
     expect((await pending).url).toBe(offer.provider.endpoint!);
     expect(f.submissions()).toBe(1); expect(f.store.pending(f.account.wallet)).toHaveLength(1);
@@ -148,9 +151,9 @@ for (const streamed of [true, false]) providerTest(`settlement admission resumes
   } finally { await f.close(); }
 });
 
-for (const action of ["abort", "stop", "timeout"] as const) providerTest(`settlement admission ${action} leaves no signed or pending payment`, async () => {
+for (const action of ["abort", "stop", "timeout"] as const) providerTest(`capacity admission ${action} leaves no signed or pending payment`, async () => {
   const f = await fixture(), model = f.catalog.models[0], controller = new AbortController();
-  Object.assign(model.offers[0], { fundedBond: "1000", exposure: "900", activeBookings: 1 });
+  Object.assign(model.offers[0], { activeBookings: 10 });
   if (action === "timeout") f.cfg.opencode.requestTimeoutMs = f.client.cfg.opencode.requestTimeoutMs = 50;
   await f.client.refresh();
   try {
@@ -160,20 +163,20 @@ for (const action of ["abort", "stop", "timeout"] as const) providerTest(`settle
     while (!f.client["catalogWaiters"].size && Date.now() < deadline) await Bun.sleep(1);
     if (action === "abort") controller.abort(new Error("fixture cancelled"));
     if (action === "stop") f.client.stop();
-    expect((await result)?.message).toContain(action === "abort" ? "fixture cancelled" : action === "stop" ? "connection closed" : "collateral");
+    expect((await result)?.message).toContain(action === "abort" ? "fixture cancelled" : action === "stop" ? "connection closed" : "busy");
     expect(f.submissions()).toBe(0); expect(f.store.pending(f.account.wallet)).toHaveLength(0);
     expect(f.client["catalogWaiters"].size).toBe(0);
   } finally { await f.close(); }
 });
 
-providerTest("funded admission adds no catalog read and permanent shortfall fails without waiting", async () => {
+providerTest("available capacity adds no catalog read and inactive offers fail without waiting", async () => {
   const f = await fixture(), model = f.catalog.models[0], body = JSON.stringify({ model: model.id, messages: [{ role: "user", content: "Hello" }], max_tokens: 128 });
   try {
-    Object.assign(model.offers[0], { fundedBond: "10", exposure: "0", activeBookings: 1 });
+    Object.assign(model.offers[0], { active: false, activeBookings: 0 });
     await f.client.refresh(); const before = f.catalogReads();
-    await expect(f.client.request("shortfall", model.id, body, "session", "primary", new AbortController().signal)).rejects.toThrow("more provider collateral");
+    await expect(f.client.request("shortfall", model.id, body, "session", "primary", new AbortController().signal)).rejects.toThrow("No provider matches");
     expect(f.catalogReads()).toBe(before); expect(f.submissions()).toBe(0);
-    Object.assign(model.offers[0], { fundedBond: "100000000", activeBookings: 0 });
+    Object.assign(model.offers[0], { active: true, activeBookings: 0 });
     await f.client.refresh(); const funded = f.catalogReads();
     await f.client.request("funded", model.id, body, "session", "primary", new AbortController().signal);
     await f.client.refresh();
@@ -181,18 +184,18 @@ providerTest("funded admission adds no catalog read and permanent shortfall fail
   } finally { await f.close(); }
 });
 
-providerTest("older HTTP catalog cannot replace newer live settlement state within the same slot", async () => {
+providerTest("older HTTP catalog cannot replace newer live capacity state within the same slot", async () => {
   const f = await fixture();
   try {
     const previous = structuredClone(f.client.catalog!), version = f.client["catalogVersion"];
-    previous.models[0].offers[0].exposure = "900";
-    const settled = structuredClone(previous); settled.models[0].offers[0].exposure = "100";
+    previous.models[0].offers[0].activeBookings = 10;
+    const settled = structuredClone(previous); settled.models[0].offers[0].activeBookings = 0;
     f.client["updateCatalog"](settled);
     f.client["updateCatalog"](previous, version);
-    expect(f.client.catalog!.models[0].offers[0].exposure).toBe("100");
+    expect(f.client.catalog!.models[0].offers[0].activeBookings).toBe(0);
     previous.slot--;
     f.client["updateCatalog"](previous);
-    expect(f.client.catalog!.models[0].offers[0].exposure).toBe("100");
+    expect(f.client.catalog!.models[0].offers[0].activeBookings).toBe(0);
   } finally { await f.close(); }
 });
 
@@ -315,11 +318,20 @@ providerTest("native OpenCode encoder routes a signed booking through the real p
     expect(result.text).toBe("Hello"); expect(f.submissions()).toBe(1);
     expect(f.bookData.readUInt32LE(128)).toBe(393216);
     expect(f.store.pending(f.account.wallet)[0].usage).toEqual({ input: 20, cached: 0, output: 8 });
-    f.bookData[148] = 1; f.bookData.writeBigUInt64LE(26n, 160);
+    f.bookData[148] = 5; f.bookData.writeBigUInt64LE(26n, 160);
     await f.client["reconcile"]();
     expect(f.store.pending(f.account.wallet)[0].stage).toBe("settled");
     expect(f.store.pending(f.account.wallet)[0].charge).toBe("26");
   } finally { await ai.dispose(); bridge.stop(true); await f.close(); }
+});
+
+providerTest("changed provider list rejects catalog refresh before any signing", async () => {
+  const f = await fixture();
+  try {
+    f.catalog.providerList = (await Keypair.generate()).publicKey.toString();
+    await expect(f.client.refresh()).rejects.toMatchObject({ code: "MARKET_CHANGED" });
+    expect(f.submissions()).toBe(0); expect(f.store.pending(f.account.wallet)).toHaveLength(0);
+  } finally { await f.close(); }
 });
 
 providerTest("booking bytes are journaled before submission and signed authorization binds exact body", async () => {
@@ -329,6 +341,7 @@ providerTest("booking bytes are journaled before submission and signed authoriza
     f.loseResponse(); const routed = await f.client.request("same-logical-call", "fixture/coder", body, "session", "primary", new AbortController().signal);
     expect(f.submissions()).toBe(1);
     const hash = createHash("sha256").update(body).digest("hex"), row = f.store.pending(f.account.wallet)[0];
+    expect(row.providerList).toBe(f.cfg.providerList);
     expect(routed.headers.get("x-fossa-body-sha256")).toBe(hash);
     const message = Buffer.from(`fossa-infer-v2:${f.cfg.programId}:${f.cfg.market}:${row.booking}:${row.generation}:${f.provider.publicKey}:${hash}`);
     expect(verifyMessage(message, Buffer.from(routed.headers.get("x-fossa-signature")!, "base64"), f.owner.publicKey.toBytes())).toBe(true);
@@ -473,13 +486,15 @@ providerTest("SSE error followed by DONE stays uncertain instead of declaring su
   } finally { await f.close(); }
 });
 
-providerTest("recovery restores cancelled booking's provider from confirmed generation without a replacement payment", async () => {
+for (const pinned of [false, true]) providerTest(`recovery ${pinned ? "retains cancelled booking endpoint after list closure" : "restores cancelled booking provider"} without a replacement payment`, async () => {
   const f = await fixture();
   try {
     const body = JSON.stringify({ model: "fixture/coder", messages: [{ role: "user", content: "hello" }], max_tokens: 128 });
     const routed = await f.client.request("recover-stop", "fixture/coder", body, "session", "primary", new AbortController().signal);
     const row = f.store.request("recover-stop", f.account.wallet)!;
-    delete row.provider; delete row.endpoint; row.cancelRequested = true; row.stage = "uncertain"; f.store.put(row);
+    if (pinned) { f.catalog.models = []; f.catalog.ready = false; }
+    else { delete row.provider; delete row.endpoint; }
+    row.cancelRequested = true; row.stage = "uncertain"; f.store.put(row);
     await f.client["reconcile"](true);
     const recovered = f.store.request("recover-stop", f.account.wallet)!;
     expect(recovered.cancelSent).toBe(true); expect(recovered.provider).toBe(f.provider.publicKey.toString());
