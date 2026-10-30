@@ -19,7 +19,7 @@ for (const setup of [false, true]) test(`journal preserves v1 signed transaction
     client.wallet = { lamports: "1000000", usdcAtomic: "0", freeAtomic: "0", generation: "0", bookings: [] } as unknown as WalletState;
     client.chain = { blockhash: new PublicKey(new Uint8Array(32).fill(4)).toString(), lastValidBlockHeight: 100, signatureFee: "5000" } as typeof client.chain;
     client["chainUntil"] = Date.now() + 60_000;
-    client["rpc"] = { sendRawTransaction: async () => "fixture" } as unknown as typeof client["rpc"];
+    client["rpc"] = { simulateTransaction: async () => ({ context: { slot: 0n }, value: { err: null, unitsConsumed: 35_454n } }), sendRawTransaction: async () => "fixture" } as unknown as typeof client["rpc"];
     const tx = new Transaction().add(ComputeBudgetProgram.setComputeUnitLimit({ units: 40_000 }));
     if (setup) tx.add(SystemProgram.createAccount({ fromPubkey: owner.publicKey, newAccountPubkey: lane.publicKey, lamports: 1000n, space: 120, programId: program }));
     tx.add(new TransactionInstruction({ programId: program, keys: [{ pubkey: lane.publicKey, isSigner: setup, isWritable: true }, { pubkey: owner.publicKey, isSigner: true, isWritable: false }], data: Buffer.alloc(116, 6) }));
@@ -30,6 +30,24 @@ for (const setup of [false, true]) test(`journal preserves v1 signed transaction
     expect(row.feeLamports).toBe(setup ? "10000" : "5000");
     expect(store.request(row.id, account.wallet)?.transaction).toBe(row.transaction);
     await client.drain();
+  } finally { store.close(); rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("stopping during compute measurement never signs or journals a new transaction", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "fossa-stop-")), store = new Store(directory);
+  try {
+    const owner = await Keypair.generate(), account = { walletId: "fixture", wallet: owner.publicKey.toString() } as Account;
+    const client = new FossaClient(store, account, () => {});
+    client.cfg = { opencode: {} } as PublicConfig;
+    client.wallet = { lamports: "1000000", usdcAtomic: "0", freeAtomic: "0", generation: "0", bookings: [] } as unknown as WalletState;
+    client.chain = { blockhash: owner.publicKey.toString(), lastValidBlockHeight: 100, signatureFee: "5000" } as typeof client.chain;
+    client["chainUntil"] = Date.now() + 60_000;
+    client["rpc"] = { simulateTransaction: async () => { client.stop(); return { context: { slot: 0n }, value: { err: null, unitsConsumed: 1000n } }; } } as unknown as typeof client["rpc"];
+    const tx = new Transaction().add(SystemProgram.transfer({ fromPubkey: owner.publicKey, toPubkey: (await Keypair.generate()).publicKey, lamports: 1n }));
+    await expect(client["journal"](tx, [owner], { id: "fixture", wallet: account.wallet, model: "", bodyHash: "", session: "", kind: "setup", booking: "", generation: "0", reserve: "0" })).rejects.toThrow("connection closed");
+    expect(tx.signatures.every(signature => signature.signature === null)).toBe(true);
+    expect(store.pending()).toHaveLength(0);
+    owner.secretKey.fill(0);
   } finally { store.close(); rmSync(directory, { recursive: true, force: true }); }
 });
 

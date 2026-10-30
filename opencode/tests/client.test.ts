@@ -67,6 +67,13 @@ async function fixture(customError = 2, retries = 0) {
     else if (body.method === "getMinimumBalanceForRentExemption") result = 1000;
     else if (body.method === "getFeeForMessage") result = { context: { slot: 100 }, value: 5000 };
     else if (body.method === "getBlockHeight") result = 100;
+    else if (body.method === "simulateTransaction") {
+      const tx = Transaction.from(Buffer.from(body.params[0], "base64"));
+      expect(body.params[1].sigVerify).toBe(false);
+      expect(tx.signatures.every(signer => signer.signature === null)).toBe(true);
+      expect(Buffer.from(tx.instructions[0].data).readUInt32LE(1)).toBe(1_400_000);
+      result = { context: { slot: 100 }, value: { err: null, unitsConsumed: 30_000, logs: [] } };
+    }
     else if (body.method === "getSignatureStatuses") result = { context: { slot: 100 }, value: body.params[0].map((value: string) => !hideStatus && (confirmedSignatures.has(value) || failures.has(value)) ? { slot: 100, confirmations: 1, confirmationStatus: "confirmed", err: failures.has(value) ? { InstructionError: [1, { Custom: customError }] } : null } : null) };
     else if (body.method === "getProgramAccounts") {
       const options = body.params[1];
@@ -90,7 +97,7 @@ async function fixture(customError = 2, retries = 0) {
       const instruction = tx.instructions.find(value => value.programId.equals(program) && Buffer.from(value.data).subarray(0, 8).equals(discriminator("global:reserve_booking")))!;
       if (instruction.keys[6].pubkey.toString() === deleted) { failures.add(signature); return json({ jsonrpc: "2.0", id: body.id, result: signature }); }
       expect(instruction.data.length).toBe(124);
-      expect(Buffer.from(tx.instructions[0].data).readUInt32LE(1)).toBe(20_000 + catalog.models[0].offerCount * 500);
+      expect(Buffer.from(tx.instructions[0].data).readUInt32LE(1)).toBe(34_000);
       expect(instruction.keys).toHaveLength(10); expect(instruction.keys[9].pubkey.toString()).toBe(catalog.models[0].group ?? program.toString()); expect(instruction.data[115]).toBe(1);
       expect(instruction.keys[8].pubkey.toString()).toBe(cfg.providerList);
       expect(instruction.keys[8].isWritable).toBe(false);

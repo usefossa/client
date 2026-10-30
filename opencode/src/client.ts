@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { Connection, ComputeBudgetProgram, Keypair, PublicKey, SystemProgram, Transaction, TransactionInstruction, type AccountInfo } from "@solana/web3.js";
+import { Connection, Keypair, PublicKey, SystemProgram, Transaction, TransactionInstruction, type AccountInfo } from "@solana/web3.js";
+import { measureCompute } from "./compute-budget";
 import { createAssociatedTokenAccountIdempotentInstruction, getAssociatedTokenAddress, TOKEN_PROGRAM_ID } from "./token";
 import bs58 from "bs58";
 import { providerError, bookingPending } from "./provider-response";
@@ -279,11 +280,15 @@ export class FossaClient {
   private async journal(tx: Transaction, signers: Keypair[], fields: Omit<Pending, "signature" | "transaction" | "expiry" | "stage" | "created">, rent: number | bigint = 0, signal?: AbortSignal) {
     this.assertJournalScope();
     const quote = this.quote(); tx.feePayer = signers[0].publicKey; tx.recentBlockhash = quote.blockhash as NonNullable<Transaction["recentBlockhash"]>;
+    signal?.throwIfAborted();
     const cost = BigInt(quote.signatureFee) * BigInt(tx.compileMessage().header.numRequiredSignatures), required = cost + BigInt(rent), balance = BigInt(this.availableWallet().lamports);
     if (balance < required) throw new FossaError("SOL_REQUIRED", `Add ${atomic(required - balance, 9)} SOL for ${rent ? "account rent and " : ""}transaction fees.`, { requiredLamports: required.toString() });
+    await measureCompute(tx, this.rpc, this.wallet?.slot ?? 0);
     signal?.throwIfAborted();
+    if (this.stopped) throw new FossaError("FOSSA_STOPPED", "Fossa connection closed.");
     await tx.sign(...signers);
     signal?.throwIfAborted();
+    if (this.stopped) throw new FossaError("FOSSA_STOPPED", "Fossa connection closed.");
     const row: Pending = { ...fields, scope: this.scope, source: this.wallet?.source, rentLamports: String(rent), ...(fields.kind === "inference" ? { dispatchStarted: false } : {}), feeLamports: cost.toString(), prepareMs: fields.startedAt === undefined ? undefined : Date.now() - fields.startedAt, signature: bs58.encode(tx.signatures[0].signature!), transaction: Buffer.from(await tx.serialize()).toString("base64"), expiry: quote.lastValidBlockHeight, stage: "prepared", created: Date.now() };
     this.submit(row); return row;
   }
@@ -296,13 +301,13 @@ export class FossaClient {
       if (!secrets.lane) throw new FossaError("ACCOUNT_PREPARING", "Fossa is preparing your website wallet accounts. Wait briefly, then try again.");
       const laneSigner = await Keypair.fromSecretKey(Uint8Array.from(secrets.lane));
       const [rent, tokenRent] = await Promise.all([this.rpc.getMinimumBalanceForRentExemption(128), this.rpc.getMinimumBalanceForRentExemption(165)]);
-      const tx = new Transaction().add(ComputeBudgetProgram.setComputeUnitLimit({ units: 40_000 }), createAssociatedTokenAccountIdempotentInstruction(owner.publicKey, vault, authority, mint), ix(program, "initialize_user", Buffer.alloc(0), [meta(owner.publicKey, true, true), meta(market), meta(lane, true, true), meta(authority), meta(vault), meta(SystemProgram.programId)]));
+      const tx = new Transaction().add(createAssociatedTokenAccountIdempotentInstruction(owner.publicKey, vault, authority, mint), ix(program, "initialize_user", Buffer.alloc(0), [meta(owner.publicKey, true, true), meta(market), meta(lane, true, true), meta(authority), meta(vault), meta(SystemProgram.programId)]));
       try { const row = await this.journal(tx, [owner, laneSigner], { id: randomUUID(), wallet: this.account.wallet, model: "", bodyHash: "", session: "", kind: "setup", booking: "", generation: "0", reserve: "0" }, rent + tokenRent, signal); const slot = await this.processed(row); row.processedSlot = slot; row.stage = "settled"; this.store.put(row); this.wallet = await this.snapshot(slot); } finally { laneSigner.secretKey.fill(0); }
     }
     for (const [address, bytes] of Object.entries(secrets.bookings)) {
       if (this.wallet.bookings.some(value => value.address === address)) continue;
       const quote = this.quote(), rent = BigInt(quote.bookingRent), booking = await Keypair.fromSecretKey(Uint8Array.from(bytes));
-      const tx = new Transaction().add(ComputeBudgetProgram.setComputeUnitLimit({ units: 25_000 }), ix(program, "initialize_receipt", Buffer.alloc(0), [meta(market), meta(lane), meta(owner.publicKey, false, true), meta(owner.publicKey, true, true), meta(booking.publicKey, true, true), meta(SystemProgram.programId)]));
+      const tx = new Transaction().add(ix(program, "initialize_receipt", Buffer.alloc(0), [meta(market), meta(lane), meta(owner.publicKey, false, true), meta(owner.publicKey, true, true), meta(booking.publicKey, true, true), meta(SystemProgram.programId)]));
       try { const row = await this.journal(tx, [owner, booking], { id: randomUUID(), wallet: this.account.wallet, model: "", bodyHash: "", session: "", kind: "setup", booking: address, generation: "0", reserve: "0" }, rent, signal); const slot = await this.processed(row); row.processedSlot = slot; row.stage = "settled"; this.store.put(row); this.wallet = await this.snapshot(slot); } finally { booking.secretKey.fill(0); }
     }
   }
@@ -404,7 +409,7 @@ export class FossaClient {
         const program = new PublicKey(this.cfg.programId), market = new PublicKey(this.cfg.market), lane = new PublicKey(this.account.lane), mint = new PublicKey(this.cfg.usdcMint);
         const owner = await Keypair.fromSecretKey(Uint8Array.from(this.store.secrets(this.account.walletId).owner));
         try {
-          const tx = new Transaction().add(ComputeBudgetProgram.setComputeUnitLimit({ units: 80_000 }));
+          const tx = new Transaction();
           let refunded = 0n, released = 0;
           const bookings: { address: string; generation: string }[] = [];
           for (const candidate of funds.bookings) {
@@ -553,7 +558,7 @@ export class FossaClient {
           const deposit = reserve > BigInt(wallet.freeAtomic) ? reserve - BigInt(wallet.freeAtomic) : 0n;
           const program = new PublicKey(this.cfg.programId), market = new PublicKey(this.cfg.market), lane = new PublicKey(this.account.lane), mint = new PublicKey(this.cfg.usdcMint);
           if (!Number.isSafeInteger(model.offerCount) || model.offerCount < model.offers.length || model.offerCount > 4096) throw new FossaError("CONFIGURATION", "Fossa model book size is invalid.");
-          const tx = new Transaction().add(ComputeBudgetProgram.setComputeUnitLimit({ units: Math.min(1_400_000, 20_000 + model.offerCount * 500) }));
+          const tx = new Transaction();
           if (deposit) { const amount = Buffer.alloc(8); amount.writeBigUInt64LE(deposit); tx.add(ix(program, "deposit", amount, [meta(market), meta(lane, true), meta(owner.publicKey, false, true), meta(new PublicKey(wallet.source), true), meta((await PublicKey.findProgramAddress([Buffer.from("vault"), lane.toBytes()], program))[0]), meta(new PublicKey(wallet.vault), true), meta(mint), meta(TOKEN_PROGRAM_ID)])); }
           const payload = Buffer.alloc(116); createHash("sha256").update(modelId).digest().copy(payload);
           priceFields.forEach((field, index) => payload.writeUInt32LE(settings[field] === undefined ? 0xffffffff : Math.floor(settings[field]! * 1_000_000), 32 + index * 4));
