@@ -38,8 +38,8 @@ test("RPC snapshot decodes account bytes and preserves amounts above Number prec
   try {
     const owner = await Keypair.fromSeed(new Uint8Array(32).fill(1)), lane = await Keypair.fromSeed(new Uint8Array(32).fill(2)), program = new PublicKey(new Uint8Array(32).fill(3)), market = new PublicKey(new Uint8Array(32).fill(4)), mint = new PublicKey(new Uint8Array(32).fill(5));
     const source = await getAssociatedTokenAddress(mint, owner.publicKey), [authority] = await PublicKey.findProgramAddress([Buffer.from("vault"), lane.publicKey.toBytes()], program), vault = await getAssociatedTokenAddress(mint, authority, true);
-    const user = Buffer.alloc(120), token = Buffer.alloc(165), amount = 9007199254740995n;
-    user.write("USER0V20"); user.set(owner.publicKey.toBytes(), 8); user.set(market.toBytes(), 40); user.set(vault.toBytes(), 80); user.writeBigUInt64LE(amount, 72); user[113] = 7;
+    const user = Buffer.alloc(128), token = Buffer.alloc(165), amount = 9007199254740995n;
+    user.set(createHash("sha256").update("account:User").digest().subarray(0, 8)); user.set(owner.publicKey.toBytes(), 8); user.set(market.toBytes(), 40); user.set(vault.toBytes(), 80); user.writeBigUInt64LE(amount, 72); user.writeBigUInt64LE(0xffffffffffffffffn, 112);
     token.set(mint.toBytes()); token.set(owner.publicKey.toBytes(), 32); token.writeBigUInt64LE(amount, 64);
     const account = { walletId: "fixture", wallet: owner.publicKey.toString(), lane: lane.publicKey.toString(), rpcUrl: "http://127.0.0.1:1" } as Account;
     const client = new FossaClient(store, account, () => {});
@@ -51,7 +51,7 @@ test("RPC snapshot decodes account bytes and preserves amounts above Number prec
       return new Response(JSON.stringify({ jsonrpc: "2.0", id: request.id, result: { context: { slot: 123 }, value: [info(Buffer.alloc(0), SystemProgram.programId), info(token, TOKEN_PROGRAM_ID), info(user, program)] } }).replace('"lamports":1', '"lamports":9007199254740995'));
     }, { preconnect: fetch.preconnect }) });
     const snapshot = await client.snapshot();
-    expect(snapshot.ready).toBe(true); expect(snapshot.slot).toBe(123); expect(snapshot.generation).toBe("7");
+    expect(snapshot.ready).toBe(true); expect(snapshot.slot).toBe(123); expect(snapshot.generation).toBe("18446744073709551615");
     expect(snapshot.lamports).toBe(amount.toString()); expect(snapshot.usdcAtomic).toBe(amount.toString()); expect(snapshot.freeAtomic).toBe(amount.toString());
     await client.drain();
   } finally { store.close(); rmSync(directory, { recursive: true, force: true }); }

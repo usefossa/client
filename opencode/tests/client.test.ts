@@ -14,16 +14,17 @@ import { make } from "@opencode/ai/promise";
 import { configure } from "@opencode/ai/providers/openai-compatible";
 import { rustProvider } from "./provider";
 
+const discriminator = (name: string) => createHash("sha256").update(name).digest().subarray(0, 8);
 const providerTest = test.skipIf(!process.env.FOSSA_PROVIDER_ROOT);
 
 async function fixture(customError = 2, retries = 0) {
   const directory = mkdtempSync(join(tmpdir(), "fossa-client-test-")), store = new Store(directory);
   const owner = await Keypair.generate(), lane = await Keypair.generate(), booking = await Keypair.generate(), provider = await Keypair.generate(), program = (await Keypair.generate()).publicKey, market = (await Keypair.generate()).publicKey, model = (await PublicKey.findProgramAddress([Buffer.from("model"), market.toBytes(), createHash("sha256").update("fixture/coder").digest()], program))[0], mint = (await Keypair.generate()).publicKey;
   const source = await getAssociatedTokenAddress(mint, owner.publicKey), vault = await getAssociatedTokenAddress(mint, (await PublicKey.findProgramAddress([Buffer.from("vault"), lane.publicKey.toBytes()], program))[0], true);
-  const userData = Buffer.alloc(120); userData.write("USER0V20"); Buffer.from(owner.publicKey.toBytes()).copy(userData, 8); Buffer.from(market.toBytes()).copy(userData, 40); Buffer.from(vault.toBytes()).copy(userData, 80);
-  const bookData = Buffer.alloc(368); bookData.write("BOOK0V20"); Buffer.from(owner.publicKey.toBytes()).copy(bookData, 8); Buffer.from(market.toBytes()).copy(bookData, 72); Buffer.from(lane.publicKey.toBytes()).copy(bookData, 192); Buffer.from(owner.publicKey.toBytes()).copy(bookData, 256); bookData[148] = 5;
+  const userData = Buffer.alloc(128); userData.set(discriminator("account:User")); Buffer.from(owner.publicKey.toBytes()).copy(userData, 8); Buffer.from(market.toBytes()).copy(userData, 40); Buffer.from(vault.toBytes()).copy(userData, 80);
+  const bookData = Buffer.alloc(472); bookData.set(discriminator("account:Booking")); Buffer.from(owner.publicKey.toBytes()).copy(bookData, 8); Buffer.from(market.toBytes()).copy(bookData, 72); Buffer.from(lane.publicKey.toBytes()).copy(bookData, 192); Buffer.from(owner.publicKey.toBytes()).copy(bookData, 256); bookData[148] = 5;
   const tokenData = Buffer.alloc(165); Buffer.from(mint.toBytes()).copy(tokenData); Buffer.from(owner.publicKey.toBytes()).copy(tokenData, 32); tokenData.writeBigUInt64LE(10_000_000n, 64);
-  const modelData = Buffer.alloc(144); modelData.write("MODELV20"); Buffer.from(market.toBytes()).copy(modelData, 8);
+  const modelData = Buffer.alloc(176); modelData.set(discriminator("account:Model")); Buffer.from(market.toBytes()).copy(modelData, 8);
   let signature = "", submitted = 0, lostFirst = false, hideStatus = false, catalogReads = 0;
   const confirmedSignatures = new Set<string>();
   const deleted = (await Keypair.generate()).publicKey.toString(), failures = new Set<string>();
@@ -69,7 +70,7 @@ async function fixture(customError = 2, retries = 0) {
     else if (body.method === "getSignatureStatuses") result = { context: { slot: 100 }, value: body.params[0].map((value: string) => !hideStatus && (confirmedSignatures.has(value) || failures.has(value)) ? { slot: 100, confirmations: 1, confirmationStatus: "confirmed", err: failures.has(value) ? { InstructionError: [1, { Custom: customError }] } : null } : null) };
     else if (body.method === "getProgramAccounts") {
       const options = body.params[1];
-      expect(options.commitment).toBe(options.filters.some((filter: { dataSize?: number; memcmp?: { offset: number; bytes: string } }) => filter.memcmp?.offset === 0 && Buffer.from(bs58.decode(filter.memcmp.bytes)).toString() === "BOOK0V20") ? "processed" : "confirmed");
+      expect(options.commitment).toBe(options.filters.some((filter: { dataSize?: number; memcmp?: { offset: number; bytes: string } }) => filter.memcmp?.offset === 0 && Buffer.from(bs58.decode(filter.memcmp.bytes)).equals(discriminator("account:Booking"))) ? "processed" : "confirmed");
       expect(options.withContext).toBe(true);
       expect(Number(options.minContextSlot ?? 0)).toBeLessThanOrEqual(100);
       result = { context: { slot: 100 }, value: [...records].filter(([, value]) => value.owner.toString() === body.params[0] && options.filters.every((filter: { dataSize?: number; memcmp?: { offset: number; bytes: string } }) => filter.dataSize === undefined ? filter.memcmp && value.data.subarray(filter.memcmp.offset, filter.memcmp.offset + bs58.decode(filter.memcmp.bytes).length).equals(bs58.decode(filter.memcmp.bytes)) : value.data.length === filter.dataSize)).map(([pubkey, value]) => ({ pubkey, account: { data: [value.data.toString("base64"), "base64"], owner: value.owner.toString(), lamports: 1000, executable: false, rentEpoch: 0 } })) };
@@ -86,23 +87,23 @@ async function fixture(customError = 2, retries = 0) {
       if (confirmedSignatures.has(signature)) return json({ jsonrpc: "2.0", id: body.id, result: signature });
       confirmedSignatures.add(signature);
       submitted++;
-      const instruction = tx.instructions.find(value => value.programId.equals(program) && value.data[0] === 6)!;
+      const instruction = tx.instructions.find(value => value.programId.equals(program) && Buffer.from(value.data).subarray(0, 8).equals(discriminator("global:reserve_booking")))!;
       if (instruction.keys[6].pubkey.toString() === deleted) { failures.add(signature); return json({ jsonrpc: "2.0", id: body.id, result: signature }); }
-      expect(instruction.data.length).toBe(116);
+      expect(instruction.data.length).toBe(124);
       expect(Buffer.from(tx.instructions[0].data).readUInt32LE(1)).toBe(20_000 + catalog.models[0].offerCount * 500);
-      expect(instruction.keys).toHaveLength(9);
+      expect(instruction.keys).toHaveLength(10); expect(instruction.keys[9].pubkey.toString()).toBe(catalog.models[0].group ?? program.toString()); expect(instruction.data[115]).toBe(1);
       expect(instruction.keys[8].pubkey.toString()).toBe(cfg.providerList);
       expect(instruction.keys[8].isWritable).toBe(false);
       expect(instruction.keys[8].isSigner).toBe(false);
-      const payload = Buffer.from(instruction.data.subarray(1));
+      const payload = Buffer.from(instruction.data.subarray(8));
       const target = records.get(instruction.keys[6].pubkey.toString())!.data;
       const matched = catalog.models[0].offers.find(offer => offer.inputRate <= payload.readUInt32LE(32) && offer.cachedRate <= payload.readUInt32LE(36) && offer.outputRate <= payload.readUInt32LE(40) && offer.speed >= payload.readUInt16LE(44) && (!payload[54] || offer.private));
       if (!matched) throw Error("Fixture found no provider matching signed routing constraints");
-      const depositInstruction = tx.instructions.find(value => value.programId.equals(program) && value.data[0] === 3), deposit = depositInstruction ? Buffer.from(depositInstruction.data).readBigUInt64LE(1) : 0n;
+      const depositInstruction = tx.instructions.find(value => value.programId.equals(program) && Buffer.from(value.data).subarray(0, 8).equals(discriminator("global:deposit"))), deposit = depositInstruction ? Buffer.from(depositInstruction.data).readBigUInt64LE(8) : 0n;
       tokenData.writeBigUInt64LE(tokenData.readBigUInt64LE(64) - deposit, 64);
       userData.writeBigUInt64LE(userData.readBigUInt64LE(72) + deposit - payload.readBigUInt64LE(55), 72);
       Buffer.from(new PublicKey(cfg.providerList).toBytes()).copy(target, 320);
-      Buffer.from(model.toBytes()).copy(target, 224); Buffer.from(new PublicKey(matched.provider.wallet).toBytes()).copy(target, 40); payload.subarray(107, 115).copy(target, 152); payload.subarray(55, 63).copy(target, 104); payload.subarray(46, 50).copy(target, 124); payload.subarray(50, 54).copy(target, 128); target.writeBigInt64LE(BigInt(Math.floor(Date.now() / 1000) + 300 + Math.ceil(payload.readUInt32LE(50) / matched.speed)), 132); target[148] = 0; target.copy(userData, 113, 152, 159); target.writeUInt32LE(matched.slot, 352);
+      Buffer.from(model.toBytes()).copy(target, 224); Buffer.from(new PublicKey(matched.provider.wallet).toBytes()).copy(target, 40); payload.subarray(108, 116).copy(target, 152); payload.subarray(55, 63).copy(target, 104); payload.subarray(46, 50).copy(target, 124); payload.subarray(50, 54).copy(target, 128); target.writeBigInt64LE(BigInt(Math.floor(Date.now() / 1000) + 300 + Math.ceil(payload.readUInt32LE(50) / matched.speed)), 132); target[148] = 0; target.copy(userData, 112, 152, 160); target.writeUInt32LE(matched.slot, 352);
       for (const socket of sockets) if (socket.data.subscribed) socket.send(JSON.stringify({ jsonrpc: "2.0", method: "accountNotification", params: { subscription: 1, result: { context: { slot: 100 }, value: { data: [target.toString("base64"), "base64"], owner: program.toString(), lamports: 1000, executable: false, rentEpoch: 0 } } } }));
       for (const socket of sockets) if (socket.data.live && socket.data.watch === instruction.keys[6].pubkey.toString()) socket.send(JSON.stringify({ type: "booking", address: socket.data.watch, data: { owner: program.toString(), data: target.toString("base64"), slot: 100 } }));
       if (lostFirst) { lostFirst = false; return new Response("Submission response lost", { status: 503 }); }
@@ -111,7 +112,7 @@ async function fixture(customError = 2, retries = 0) {
     return json({ jsonrpc: "2.0", id: body.id, result });
   } });
   cfg = { programId: program.toString(), market: market.toString(), providerList: (await Keypair.generate()).publicKey.toString(), usdcMint: mint.toString(), solanaRpc: server.url.origin + "/rpc", opencode: { siteUrl: server.url.origin, deviceTtlSecs: 60, maxInputTokens: 65536, maxRequestBytes: 2_200_000, catalogMaxAgeMs: 30_000, requestTimeoutMs: 5000, pollIntervalMs: 100, mainnetGenesisHash: "fixture-mainnet-genesis", localBookingPoolSize: 2 } };
-  catalog = { ready: true, slot: 100, programId: cfg.programId, market: cfg.market, providerList: cfg.providerList, models: [{ id: "fixture/coder", address: model.toString(), name: "Fixture coder", terms: (await Keypair.generate()).publicKey.toString(), capacity: (await Keypair.generate()).publicKey.toString(), contextTokens: 65536, outputTokens: 8192, capabilities: { tools: true, reasoning: true }, modalities: { input: ["text"], output: ["text"] }, offerCount: 64, offers: [{ slot: 0, provider: { wallet: provider.publicKey.toString(), name: "Fixture provider", endpoint: server.url.origin + "/v1/chat/completions" }, inputRate: 500000, cachedRate: 40000, outputRate: 2000000, speed: 100, available: true, active: true, private: false, capacity: 10, activeBookings: 0 }] }] };
+  catalog = { providerListFeeBps: 100, providerListProtocolShareBps: 5000, ready: true, slot: 100, programId: cfg.programId, market: cfg.market, providerList: cfg.providerList, models: [{ id: "fixture/coder", address: model.toString(), group: null, name: "Fixture coder", terms: (await Keypair.generate()).publicKey.toString(), capacity: (await Keypair.generate()).publicKey.toString(), contextTokens: 65536, outputTokens: 8192, capabilities: { tools: true, reasoning: true }, modalities: { input: ["text"], output: ["text"] }, offerCount: 64, offers: [{ slot: 0, provider: { wallet: provider.publicKey.toString(), name: "Fixture provider", endpoint: server.url.origin + "/v1/chat/completions" }, inputRate: 500000, cachedRate: 40000, outputRate: 2000000, speed: 100, available: true, active: true, private: false, capacity: 10, activeBookings: 0 }] }] };
   let providerStream: ReturnType<typeof Bun.serve>;
   try { providerStream = Bun.serve({ hostname: "127.0.0.1", port: Number(server.port) + 1, fetch(request, socket) { if (socket.upgrade(request, { data: undefined })) return; return new Response(null, { status: 400 }); }, websocket: { message(socket, message) { const request = JSON.parse(String(message)); socket.send(JSON.stringify({ jsonrpc: "2.0", id: request.id, result: request.method.endsWith("Unsubscribe") ? true : request.id })); } } }); }
   catch (error) { server.stop(true); store.close(); rmSync(directory, { recursive: true, force: true }); if ((error as { code?: string }).code === "EADDRINUSE" && retries < 10) return fixture(customError, retries + 1); throw error; }
@@ -122,7 +123,7 @@ async function fixture(customError = 2, retries = 0) {
   const client = new FossaClient(store, account, () => {}); await client.start();
   for (let attempt = 0; attempt < 100 && !client["chain"]; attempt++) await Bun.sleep(5);
   expect(client["chain"]).toBeDefined();
-  return { client, store, account, provider, owner, bookData, tokenData, cfg, catalog,
+  return { client, store, account, provider, owner, bookData, tokenData, modelData, cfg, catalog,
     catalogReads: () => catalogReads,
     publish: (value: unknown) => { for (const socket of sockets) if (socket.data.live) socket.send(JSON.stringify(value)); },
     publishCatalog: () => { for (const socket of sockets) if (socket.data.live) socket.send(JSON.stringify({ type: "catalog", data: catalog })); },
@@ -131,6 +132,21 @@ async function fixture(customError = 2, retries = 0) {
     closeBooking: () => { for (const socket of sockets) if (socket.data.live) socket.send(JSON.stringify({ type: "booking", address: booking.publicKey.toString(), data: { owner: null, data: null, slot: 101, version: 1 } })); },
     submissions: () => submitted, hideStatus: () => { hideStatus = true; }, loseResponse: () => { lostFirst = true; }, close: async () => { client.stop(); await providerServer.close(); await Bun.sleep(600); store.close(); server.stop(true); providerStream.stop(true); owner.secretKey.fill(0); provider.secretKey.fill(0); rmSync(directory, { recursive: true, force: true }); } };
 }
+
+providerTest("shared model group remains in the signed native reservation", async () => {
+  const f = await fixture();
+  try {
+    const model = f.catalog.models[0], group = (await Keypair.generate()).publicKey;
+    model.group = group.toString(); f.modelData.set(group.toBytes(), 144);
+    await f.client.refresh();
+    const body = JSON.stringify({ model: model.id, messages: [{ role: "user", content: "Hello" }], max_tokens: 128 });
+    const routed = await f.client.request("group", model.id, body, "session", "primary", new AbortController().signal);
+    const response = await fetch(routed.url, { method: "POST", headers: routed.headers, body });
+    expect(response.ok).toBe(true);
+    expect(await f.client.response(new Request(routed.url, { headers: routed.headers }), response).text()).toContain("Hello");
+    expect(f.submissions()).toBe(1);
+  } finally { await f.close(); }
+});
 
 for (const streamed of [true, false]) providerTest(`capacity admission resumes from ${streamed ? "live catalog" : "HTTP fallback"} without another payment`, async () => {
   const f = await fixture(), model = f.catalog.models[0], offer = model.offers[0];
@@ -404,10 +420,10 @@ providerTest("continued chat signs unrestricted caps and cache provenance before
     const continuation = JSON.stringify({ model: model.id, max_tokens: 128, messages: [...messages, { role: "assistant", content: "Hello" }, { role: "user", content: "Continue" }] });
     await f.client.request("continuation", model.id, continuation, "session", "primary", new AbortController().signal);
     const row = f.store.pending(f.account.wallet).find(row => row.id === "continuation")!;
-    const instruction = Transaction.from(Buffer.from(row.transaction, "base64")).instructions.find(value => value.data[0] === 6 && value.programId.toString() === f.cfg.programId)!;
-    for (const offset of [33, 37, 41]) expect(Buffer.from(instruction.data).readUInt32LE(offset)).toBe(0xffffffff);
-    expect(Buffer.from(instruction.data).readUInt32LE(68)).toBe(1010);
-    expect(new PublicKey(instruction.data.subarray(76, 108)).toString()).toBe(f.provider.publicKey.toString());
+    const instruction = Transaction.from(Buffer.from(row.transaction, "base64")).instructions.find(value => Buffer.from(value.data).subarray(0, 8).equals(discriminator("global:reserve_booking")) && value.programId.toString() === f.cfg.programId)!;
+    for (const offset of [40, 44, 48]) expect(Buffer.from(instruction.data).readUInt32LE(offset)).toBe(0xffffffff);
+    expect(Buffer.from(instruction.data).readUInt32LE(75)).toBe(1010);
+    expect(new PublicKey(instruction.data.subarray(83, 115)).toString()).toBe(f.provider.publicKey.toString());
     expect(f.bookData.readUInt32LE(352)).toBe(0);
   } finally { await f.close(); }
 });

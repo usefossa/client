@@ -2,7 +2,7 @@ import { Database } from "bun:sqlite";
 import { chmodSync, closeSync, fsyncSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { createCipheriv, createDecipheriv, randomBytes, scrypt, randomUUID } from "node:crypto";
+import { createCipheriv, createDecipheriv, randomBytes, scrypt, randomUUID, createHash } from "node:crypto";
 import { Keypair, Transaction } from "@solana/web3.js";
 import bs58 from "bs58";
 import { defaultSettings, priceFields, validateSettings } from "./routing";
@@ -51,17 +51,30 @@ export class Store {
         const row = JSON.parse(saved.state) as Pending, tx = Transaction.from(Buffer.from(row.transaction, "base64"));
         if (tx.feePayer?.toString() !== row.wallet || bs58.encode(tx.signatures[0].signature!) !== row.signature) continue;
         const bindings = tx.instructions.flatMap(ix => {
-          const op = ix.data[0], keys = ix.keys, at = op === 6 ? [0, 4, 5] : op === 1 ? [2, 0, 1] : [3, 10, 26].includes(op) ? [0, 1, 2] : undefined;
+          const native = Object.entries({ 1: "initialize_user", 3: "deposit", 6: "reserve_booking", 10: "withdraw", 26: "initialize_receipt" }).find(([, name]) => Buffer.from(ix.data).subarray(0, 8).equals(createHash("sha256").update(`global:${name}`).digest().subarray(0, 8)));
+          const op = native ? Number(native[0]) : ix.data[0], keys = ix.keys, at = op === 6 ? [0, 4, 5] : op === 1 ? native ? [1, 2, 0] : [2, 0, 1] : [3, 10, 26].includes(op) ? [0, 1, 2] : undefined;
           if (!at || !keys[at[2]]?.isSigner || keys[at[2]].pubkey.toString() !== row.wallet) return [];
-          if ((op === 6 ? ![8, 9].includes(keys.length) : keys.length !== ({ 1: 4, 3: 7, 10: 8, 26: 5 } as Record<number, number>)[op]) || (op !== 6 && ix.data.length !== ([3, 10].includes(op) ? 9 : 1))) return [];
-          if (op === 6 && (keys[6]?.pubkey.toString() !== row.booking || ![108, 116].includes(ix.data.length) || (ix.data.length === 116 ? Buffer.from(ix.data).readBigUInt64LE(108).toString() : "0") !== row.generation)) return [];
-          if (op === 6 && keys.length === 9) { if (keys[8].isSigner || keys[8].isWritable) return []; row.providerList = keys[8].pubkey.toString(); }
+          if (native) {
+            if (keys.length !== ({ 1: 6, 3: 8, 6: 10, 10: 8, 26: 6 } as Record<number, number>)[op]) return [];
+            if (op === 6 ? ix.data.length !== 124 || ix.data[115] !== 1 || Buffer.from(ix.data).readBigUInt64LE(116).toString() !== row.generation : ix.data.length !== ([3, 10].includes(op) ? 16 : 8)) return [];
+          } else {
+            if ((op === 6 ? ![8, 9].includes(keys.length) : keys.length !== ({ 1: 4, 3: 7, 10: 8, 26: 5 } as Record<number, number>)[op]) || (op !== 6 && ix.data.length !== ([3, 10].includes(op) ? 9 : 1))) return [];
+            if (op === 6 && (![108, 116].includes(ix.data.length) || (ix.data.length === 116 ? Buffer.from(ix.data).readBigUInt64LE(108).toString() : "0") !== row.generation)) return [];
+          }
+          if (op === 6 && keys[6]?.pubkey.toString() !== row.booking) return [];
+          if (op === 6 && keys.length >= 9) { if (keys[8].isSigner || keys[8].isWritable) return []; row.providerList = keys[8].pubkey.toString(); }
           return [{ program: ix.programId.toString(), market: keys[at[0]].pubkey.toString(), lane: keys[at[1]].pubkey.toString() }];
         });
         if (!bindings.length || bindings.some(value => JSON.stringify(value) !== JSON.stringify(bindings[0]))) continue;
         row.scope = bindings[0];
-        const transfer = tx.instructions.find(ix => ix.programId.toString() === row.scope!.program && [3, 10].includes(ix.data[0]));
-        if (transfer) { row.source = transfer.keys[transfer.data[0] === 3 ? 3 : 4]?.pubkey.toString(); row.scope.mint = transfer.keys[5]?.pubkey.toString(); }
+        const transfer = tx.instructions.flatMap(ix => {
+          if (ix.programId.toString() !== row.scope!.program) return [];
+          const data = Buffer.from(ix.data), nativeDeposit = data.subarray(0, 8).equals(createHash("sha256").update("global:deposit").digest().subarray(0, 8));
+          const nativeWithdraw = data.subarray(0, 8).equals(createHash("sha256").update("global:withdraw").digest().subarray(0, 8));
+          if (!nativeDeposit && !nativeWithdraw && ![3, 10].includes(data[0])) return [];
+          return [{ source: ix.keys[nativeDeposit || data[0] === 3 ? 3 : 4]?.pubkey.toString(), mint: ix.keys[nativeDeposit ? 6 : 5]?.pubkey.toString() }];
+        })[0];
+        if (transfer) { row.source = transfer.source; row.scope.mint = transfer.mint; }
         this.put(row);
       } catch { /* retain unknown legacy journals for explicit recovery; never guess their lane. */ }
     }

@@ -12,7 +12,7 @@ export function installConfig(text: string, plugin: string, endpoint = DEFAULT_A
   if (errors.length || !value || typeof value !== "object" || Array.isArray(value) || value.plugins !== undefined && !Array.isArray(value.plugins)) throw Error("Existing OpenCode configuration is invalid; it was not changed.");
   const own = (item: unknown) => {
     const spec = typeof item === "string" ? item : (item as Entry | null)?.package;
-    if (spec === plugin || spec === "@fossa/opencode" || spec?.startsWith("@fossa/opencode@") || spec && /^github:usefossa\/client(?:#[^:]*)?::path:opencode$/.test(spec)) return true;
+    if (spec === plugin || spec === "@fossa/opencode" || spec?.startsWith("@fossa/opencode@") || spec && /^github:usefossa\/client(?:#(?:semver:)?[^:]*)?::path:opencode$/.test(spec)) return true;
     try {
       const path = spec?.startsWith("file:") ? fileURLToPath(spec) : spec;
       return !!path && isAbsolute(path) && JSON.parse(readFileSync(resolve(path, "package.json"), "utf8")).name === "@fossa/opencode";

@@ -16,7 +16,8 @@ export { eligible, fee } from "./routing";
 const atomic = (value: bigint, decimals = 6) => `${value / 10n ** BigInt(decimals)}.${(value % 10n ** BigInt(decimals)).toString().padStart(decimals, "0")}`;
 const digest = (body: string) => createHash("sha256").update(body).digest("hex");
 const meta = (pubkey: PublicKey, isWritable = false, isSigner = false) => ({ pubkey, isWritable, isSigner });
-const ix = (programId: PublicKey, opcode: number, data: Buffer, keys: ReturnType<typeof meta>[]) => new TransactionInstruction({ programId, data: Buffer.concat([Buffer.from([opcode]), data]), keys });
+const discriminator = (name: string) => createHash("sha256").update(name).digest().subarray(0, 8);
+const ix = (programId: PublicKey, name: string, data: Buffer, keys: ReturnType<typeof meta>[]) => new TransactionInstruction({ programId, data: Buffer.concat([discriminator(`global:${name}`), data]), keys });
 const terminal = new Set(["settled", "released", "failed", "expired"]);
 const validSlot = (value: unknown) => typeof value === "bigint" ? value >= 0n && value <= BigInt(Number.MAX_SAFE_INTEGER) : typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 const LiveSocket = WebSocket as typeof WebSocket & { new(url: URL, options: Bun.WebSocketOptions): WebSocket };
@@ -137,11 +138,11 @@ export class FossaClient {
     const addresses = [owner, source, lane, ...[...pool].map(value => new PublicKey(value))];
     const result = await this.rpc.getMultipleAccountsInfoAndContext(addresses, { commitment: "processed", ...(minSlot ? { minContextSlot: minSlot } : {}) });
     const values = result.value.map(info => info && ({ ...info, data: Buffer.from(info.data) })), [balance, token, user] = values;
-    const ready = Boolean(user && user.owner.equals(program) && user.data.length === 120 && user.data.subarray(0, 8).toString() === "USER0V20" && user.data.subarray(8, 40).equals(owner.toBytes()) && user.data.subarray(40, 72).equals(new PublicKey(this.cfg.market).toBytes()) && user.data.subarray(80, 112).equals(vault.toBytes()));
+    const ready = Boolean(user && user.owner.equals(program) && user.data.length === 128 && user.data.subarray(0, 8).equals(discriminator("account:User")) && user.data.subarray(8, 40).equals(owner.toBytes()) && user.data.subarray(40, 72).equals(new PublicKey(this.cfg.market).toBytes()) && user.data.subarray(80, 112).equals(vault.toBytes()));
     if (user && !ready) throw new FossaError("ACCOUNT_INVALID", "Fossa user account identity is invalid.");
-    const counter = Buffer.alloc(8); if (ready) user!.data.copy(counter, 0, 113, 120);
+    const counter = Buffer.alloc(8); if (ready) user!.data.copy(counter, 0, 112, 120);
     const validToken = token && token.owner.equals(TOKEN_PROGRAM_ID) && token.data.length === 165 && token.data.subarray(0, 32).equals(mint.toBytes()) && token.data.subarray(32, 64).equals(owner.toBytes());
-    return { wallet: this.account.wallet, lane: this.account.lane, source: source.toBase58(), vault: vault.toBase58(), ready, lamports: String(balance?.lamports ?? 0), usdcAtomic: validToken ? token.data.readBigUInt64LE(64).toString() : "0", freeAtomic: ready ? user!.data.readBigUInt64LE(72).toString() : "0", generation: counter.readBigUInt64LE().toString(), slot: Number(result.context.slot), bookings: [...pool].flatMap((address, index) => { const value = values[index + 3]; if (!value || !value.lamports && !value.data.length) return []; if (!value.owner.equals(program) || value.data.length !== 368 || value.data.subarray(0, 8).toString() !== "BOOK0V20" || !value.data.subarray(8, 40).equals(owner.toBytes()) || !value.data.subarray(192, 224).equals(lane.toBytes())) throw new FossaError("ACCOUNT_INVALID", "Booking pool identity is invalid."); return [{ address, status: value.data[148], generation: value.data.readBigUInt64LE(152).toString(), rentPayer: new PublicKey(value.data.subarray(256, 288)).toBase58() }]; }) };
+    return { wallet: this.account.wallet, lane: this.account.lane, source: source.toBase58(), vault: vault.toBase58(), ready, lamports: String(balance?.lamports ?? 0), usdcAtomic: validToken ? token.data.readBigUInt64LE(64).toString() : "0", freeAtomic: ready ? user!.data.readBigUInt64LE(72).toString() : "0", generation: counter.readBigUInt64LE().toString(), slot: Number(result.context.slot), bookings: [...pool].flatMap((address, index) => { const value = values[index + 3]; if (!value || !value.lamports && !value.data.length) return []; if (!value.owner.equals(program) || value.data.length !== 472 || !value.data.subarray(0, 8).equals(discriminator("account:Booking")) || !value.data.subarray(8, 40).equals(owner.toBytes()) || !value.data.subarray(192, 224).equals(lane.toBytes())) throw new FossaError("ACCOUNT_INVALID", "Booking pool identity is invalid."); return [{ address, status: value.data[148], generation: value.data.readBigUInt64LE(152).toString(), rentPayer: new PublicKey(value.data.subarray(256, 288)).toBase58() }]; }) };
   }
   private get scope() { return this.cfg ? { program: this.cfg.programId, market: this.cfg.market, lane: this.account.lane, genesis: this.cfg.opencode.mainnetGenesisHash, mint: this.cfg.usdcMint } : undefined; }
   private rows(active = false) { return this.store.pending(this.account.wallet, this.scope, active); }
@@ -215,14 +216,14 @@ export class FossaClient {
           const [statuses, account] = await Promise.all([
             this.signatureStatuses([row.signature]),
             wake && row.kind === "inference" ? this.rpc.getAccountInfoAndContext(new PublicKey(row.booking), "processed").then(account => {
-              if (!done && account.value?.owner.equals(new PublicKey(this.cfg.programId)) && account.value.data.length === 368 && account.value.data[148] === 0 && Buffer.from(account.value.data).readBigUInt64LE(152).toString() === row.generation) this.watchers.get(row.booking)?.(account.value, Number(account.context.slot), "rpc");
+              if (!done && account.value?.owner.equals(new PublicKey(this.cfg.programId)) && account.value.data.length === 472 && account.value.data[148] === 0 && Buffer.from(account.value.data).readBigUInt64LE(152).toString() === row.generation) this.watchers.get(row.booking)?.(account.value, Number(account.context.slot), "rpc");
               return account;
             }) : undefined,
           ]);
           const [status] = statuses;
           if (done) return 0;
           if (status?.err && ["confirmed", "finalized"].includes(status.confirmationStatus ?? "")) { row.stage = "failed"; row.error = JSON.stringify(status.err, (_key, value) => typeof value === "bigint" ? value.toString() : value); this.store.put(row); throw new FossaError("TRANSACTION_FAILED", row.kind === "rakeback" ? `Rakeback transaction failed: ${row.signature}. No funds were moved.` : `Fossa transaction failed: ${row.signature}. No booking USDC was charged.`); }
-          if (account?.value?.owner.equals(new PublicKey(this.cfg.programId)) && account.value.data.length === 368 && account.value.data[148] === 0 && Buffer.from(account.value.data).readBigUInt64LE(152).toString() === row.generation) {
+          if (account?.value?.owner.equals(new PublicKey(this.cfg.programId)) && account.value.data.length === 472 && account.value.data[148] === 0 && Buffer.from(account.value.data).readBigUInt64LE(152).toString() === row.generation) {
             this.watchers.get(row.booking)?.(account.value, Number(account.context.slot), "rpc");
             return Number(account.context.slot);
           }
@@ -294,20 +295,20 @@ export class FossaClient {
     if (!this.wallet.ready) {
       if (!secrets.lane) throw new FossaError("ACCOUNT_PREPARING", "Fossa is preparing your website wallet accounts. Wait briefly, then try again.");
       const laneSigner = await Keypair.fromSecretKey(Uint8Array.from(secrets.lane));
-      const [rent, tokenRent] = await Promise.all([this.rpc.getMinimumBalanceForRentExemption(120), this.rpc.getMinimumBalanceForRentExemption(165)]);
-      const tx = new Transaction().add(ComputeBudgetProgram.setComputeUnitLimit({ units: 40_000 }), SystemProgram.createAccount({ fromPubkey: owner.publicKey, newAccountPubkey: lane, lamports: rent, space: 120, programId: program }), createAssociatedTokenAccountIdempotentInstruction(owner.publicKey, vault, authority, mint), ix(program, 1, Buffer.alloc(0), [meta(lane, true, true), meta(owner.publicKey, false, true), meta(market), meta(vault)]));
+      const [rent, tokenRent] = await Promise.all([this.rpc.getMinimumBalanceForRentExemption(128), this.rpc.getMinimumBalanceForRentExemption(165)]);
+      const tx = new Transaction().add(ComputeBudgetProgram.setComputeUnitLimit({ units: 40_000 }), createAssociatedTokenAccountIdempotentInstruction(owner.publicKey, vault, authority, mint), ix(program, "initialize_user", Buffer.alloc(0), [meta(owner.publicKey, true, true), meta(market), meta(lane, true, true), meta(authority), meta(vault), meta(SystemProgram.programId)]));
       try { const row = await this.journal(tx, [owner, laneSigner], { id: randomUUID(), wallet: this.account.wallet, model: "", bodyHash: "", session: "", kind: "setup", booking: "", generation: "0", reserve: "0" }, rent + tokenRent, signal); const slot = await this.processed(row); row.processedSlot = slot; row.stage = "settled"; this.store.put(row); this.wallet = await this.snapshot(slot); } finally { laneSigner.secretKey.fill(0); }
     }
     for (const [address, bytes] of Object.entries(secrets.bookings)) {
       if (this.wallet.bookings.some(value => value.address === address)) continue;
       const quote = this.quote(), rent = BigInt(quote.bookingRent), booking = await Keypair.fromSecretKey(Uint8Array.from(bytes));
-      const tx = new Transaction().add(ComputeBudgetProgram.setComputeUnitLimit({ units: 25_000 }), SystemProgram.createAccount({ fromPubkey: owner.publicKey, newAccountPubkey: booking.publicKey, lamports: rent, space: 368, programId: program }), ix(program, 26, Buffer.alloc(0), [meta(market), meta(lane), meta(owner.publicKey, false, true), meta(booking.publicKey, true, true), meta(owner.publicKey, false, true)]));
+      const tx = new Transaction().add(ComputeBudgetProgram.setComputeUnitLimit({ units: 25_000 }), ix(program, "initialize_receipt", Buffer.alloc(0), [meta(market), meta(lane), meta(owner.publicKey, false, true), meta(owner.publicKey, true, true), meta(booking.publicKey, true, true), meta(SystemProgram.programId)]));
       try { const row = await this.journal(tx, [owner, booking], { id: randomUUID(), wallet: this.account.wallet, model: "", bodyHash: "", session: "", kind: "setup", booking: address, generation: "0", reserve: "0" }, rent, signal); const slot = await this.processed(row); row.processedSlot = slot; row.stage = "settled"; this.store.put(row); this.wallet = await this.snapshot(slot); } finally { booking.secretKey.fill(0); }
     }
   }
   private inspect(info: AccountInfo<Uint8Array>, row: Pending, model: Pick<MarketModel, "address">) {
     const data = Buffer.from(info.data);
-    if (!info.owner.equals(new PublicKey(this.cfg.programId)) || data.length !== 368 || data.subarray(0, 8).toString() !== "BOOK0V20" || !data.subarray(8, 40).equals(new PublicKey(this.account.wallet).toBytes()) || !data.subarray(72, 104).equals(new PublicKey(this.cfg.market).toBytes()) || !data.subarray(192, 224).equals(new PublicKey(this.account.lane).toBytes()) || !data.subarray(224, 256).equals(new PublicKey(model.address).toBytes()) || data.readBigUInt64LE(152).toString() !== row.generation || row.providerList && !data.subarray(320, 352).equals(new PublicKey(row.providerList).toBytes())) throw new FossaError("BOOKING_CHANGED", "Booking identity or generation changed. Reconcile before retrying.");
+    if (!info.owner.equals(new PublicKey(this.cfg.programId)) || data.length !== 472 || !data.subarray(0, 8).equals(discriminator("account:Booking")) || !data.subarray(8, 40).equals(new PublicKey(this.account.wallet).toBytes()) || !data.subarray(72, 104).equals(new PublicKey(this.cfg.market).toBytes()) || !data.subarray(192, 224).equals(new PublicKey(this.account.lane).toBytes()) || !data.subarray(224, 256).equals(new PublicKey(model.address).toBytes()) || data.readBigUInt64LE(152).toString() !== row.generation || row.providerList && !data.subarray(320, 352).equals(new PublicKey(row.providerList).toBytes())) throw new FossaError("BOOKING_CHANGED", "Booking identity or generation changed. Reconcile before retrying.");
     return data;
   }
   private async rakebackFunds(): Promise<RakebackFunds> {
@@ -377,7 +378,7 @@ export class FossaClient {
   }
   private bookingData(info: AccountInfo<Uint8Array>) {
     const data = Buffer.from(info.data);
-    if (!info.owner.equals(new PublicKey(this.cfg.programId)) || data.length !== 368 || data.subarray(0, 8).toString() !== "BOOK0V20" || !data.subarray(8, 40).equals(new PublicKey(this.account.wallet).toBytes()) || !data.subarray(72, 104).equals(new PublicKey(this.cfg.market).toBytes()) || !data.subarray(192, 224).equals(new PublicKey(this.account.lane).toBytes())) throw new FossaError("ACCOUNT_INVALID", "Rakeback booking does not belong to this wallet and market.");
+    if (!info.owner.equals(new PublicKey(this.cfg.programId)) || data.length !== 472 || !data.subarray(0, 8).equals(discriminator("account:Booking")) || !data.subarray(8, 40).equals(new PublicKey(this.account.wallet).toBytes()) || !data.subarray(72, 104).equals(new PublicKey(this.cfg.market).toBytes()) || !data.subarray(192, 224).equals(new PublicKey(this.account.lane).toBytes())) throw new FossaError("ACCOUNT_INVALID", "Rakeback booking does not belong to this wallet and market.");
     return data;
   }
   rakeback(automatic = false) {
@@ -413,19 +414,19 @@ export class FossaClient {
             const data = this.bookingData(info), generation = data.readBigUInt64LE(152);
             if (data[148] !== 0 || generation.toString() !== candidate.generation || Number(data.readBigInt64LE(132)) + 15 >= Date.now() / 1000) continue;
             const model = new PublicKey(data.subarray(224, 256)), record = await this.rpc.getAccountInfo(model, "confirmed");
-            if (!record || !record.owner.equals(program) || record.data.length !== 144 || Buffer.from(record.data).subarray(0, 8).toString() !== "MODELV20" || !Buffer.from(record.data).subarray(8, 40).equals(market.toBytes())) throw new FossaError("ACCOUNT_INVALID", "Rakeback model is unavailable or invalid.");
-            tx.add(ix(program, 8, generation ? Buffer.from(data.subarray(152, 160)) : Buffer.alloc(0), [meta(market), meta(model), meta(new PublicKey(record.data.subarray(104, 136)), true), meta(lane, true), meta(address, true)]));
+            if (!record || !record.owner.equals(program) || record.data.length !== 176 || !Buffer.from(record.data).subarray(0, 8).equals(discriminator("account:Model")) || !Buffer.from(record.data).subarray(8, 40).equals(market.toBytes())) throw new FossaError("ACCOUNT_INVALID", "Rakeback model is unavailable or invalid.");
+            tx.add(ix(program, "expire_booking", Buffer.concat([Buffer.from([1]), data.subarray(152, 160)]), [meta(market), meta(model), meta(new PublicKey(record.data.subarray(104, 136)), true), meta(lane, true), meta(address, true)]));
             refunded += data.readBigUInt64LE(104); released++; bookings.push({ address: candidate.address, generation: candidate.generation });
           }
           const laneInfo = await this.rpc.getAccountInfo(lane, "confirmed"), vault = new PublicKey(this.wallet.vault);
-          if (!laneInfo || !laneInfo.owner.equals(program) || laneInfo.data.length !== 120 || Buffer.from(laneInfo.data).subarray(0, 8).toString() !== "USER0V20" || !Buffer.from(laneInfo.data).subarray(8, 40).equals(owner.publicKey.toBytes()) || !Buffer.from(laneInfo.data).subarray(40, 72).equals(market.toBytes()) || !Buffer.from(laneInfo.data).subarray(80, 112).equals(vault.toBytes())) throw new FossaError("ACCOUNT_INVALID", "Rakeback wallet account is invalid.");
+          if (!laneInfo || !laneInfo.owner.equals(program) || laneInfo.data.length !== 128 || !Buffer.from(laneInfo.data).subarray(0, 8).equals(discriminator("account:User")) || !Buffer.from(laneInfo.data).subarray(8, 40).equals(owner.publicKey.toBytes()) || !Buffer.from(laneInfo.data).subarray(40, 72).equals(market.toBytes()) || !Buffer.from(laneInfo.data).subarray(80, 112).equals(vault.toBytes())) throw new FossaError("ACCOUNT_INVALID", "Rakeback wallet account is invalid.");
           const amount = Buffer.from(laneInfo.data).readBigUInt64LE(72) + refunded;
           if (!amount) return finish(previous.amount, previous.signatures);
           const source = await getAssociatedTokenAddress(mint, owner.publicKey), authority = (await PublicKey.findProgramAddress([Buffer.from("vault"), lane.toBytes()], program))[0];
           let rent = 0n;
           if (!await this.rpc.getAccountInfo(source, "confirmed")) { rent = await this.rpc.getMinimumBalanceForRentExemption(165); tx.add(createAssociatedTokenAccountIdempotentInstruction(owner.publicKey, source, owner.publicKey, mint)); }
           const payload = Buffer.alloc(8); payload.writeBigUInt64LE(amount);
-          tx.add(ix(program, 10, payload, [meta(market), meta(lane, true), meta(owner.publicKey, false, true), meta(vault, true), meta(source, true), meta(mint), meta(authority), meta(TOKEN_PROGRAM_ID)]));
+          tx.add(ix(program, "withdraw", payload, [meta(market), meta(lane, true), meta(owner.publicKey, false, true), meta(vault, true), meta(source, true), meta(mint), meta(authority), meta(TOKEN_PROGRAM_ID)]));
           if (this.stopped || automatic && !this.store.rakeback(this.account.walletId).settings.autoRakeback) throw new FossaError("RAKEBACK_STOPPED", "Automatic rakeback stopped before signing.");
           const row = await this.journal(tx, [owner], { id: randomUUID(), wallet: this.account.wallet, model: "", bodyHash: "", session: "", kind: "rakeback", booking: "", generation: "0", reserve: "0", withdrawal: amount.toString(), refund: refunded.toString() }, rent);
           row.processedSlot = await this.processed(row, undefined, undefined, true); row.stage = "settled"; this.store.put(row);
@@ -518,10 +519,13 @@ export class FossaClient {
       admissionWaitMs = Date.now() - admissionAt;
       const best = ranked[0];
       const minSpeed = settings.mode === "cheapest" ? settings.minSpeed : Math.max(settings.minSpeed, best?.speed ?? 0);
-      const maxSpend = best ? fee(maxInput, best.inputRate) + fee(maxOutput, best.outputRate) + 1n : 0n;
-      const offers = ranked.filter(offer => offer.speed >= minSpeed && fee(maxInput, offer.inputRate) + fee(maxOutput, offer.outputRate) + 1n <= maxSpend);
+      const listFeeBps = this.catalog.providerListFeeBps;
+      if (!Number.isInteger(listFeeBps) || listFeeBps! < 10 || listFeeBps! > 300 || model.group === undefined) throw new FossaError("CONFIGURATION", "Refresh Fossa protocol configuration before signing.");
+      const withListFee = (base: bigint) => base + (base * BigInt(listFeeBps!) + 9999n) / 10000n;
+      const maxSpend = best ? withListFee(fee(maxInput, best.inputRate) + fee(maxOutput, best.outputRate) + 1n) : 0n;
+      const offers = ranked.filter(offer => offer.speed >= minSpeed && withListFee(fee(maxInput, offer.inputRate) + fee(maxOutput, offer.outputRate) + 1n) <= maxSpend);
       if (!offers.length) { const reason = unavailable(model, settings, maxInput, maxOutput); throw new FossaError("NO_PROVIDER", reason.message, { ...reason.data, catalogSlot: this.catalog.slot }); }
-      const reserve = offers.reduce((max, offer) => { const value = fee(maxInput, offer.inputRate) + fee(maxOutput, offer.outputRate) + 1n; return value > max ? value : max; }, 0n);
+      const reserve = offers.reduce((max, offer) => { const value = withListFee(fee(maxInput, offer.inputRate) + fee(maxOutput, offer.outputRate) + 1n); return value > max ? value : max; }, 0n);
       let wallet = this.availableWallet();
       const total = BigInt(wallet.usdcAtomic) + BigInt(wallet.freeAtomic);
       if (total < reserve) throw new FossaError("USDC_REQUIRED", `Add ${atomic(reserve - total)} USDC to ${this.account.wallet} to cover this request's maximum reservation.`, { shortfallAtomic: (reserve - total).toString(), wallet: this.account.wallet });
@@ -550,17 +554,17 @@ export class FossaClient {
           const program = new PublicKey(this.cfg.programId), market = new PublicKey(this.cfg.market), lane = new PublicKey(this.account.lane), mint = new PublicKey(this.cfg.usdcMint);
           if (!Number.isSafeInteger(model.offerCount) || model.offerCount < model.offers.length || model.offerCount > 4096) throw new FossaError("CONFIGURATION", "Fossa model book size is invalid.");
           const tx = new Transaction().add(ComputeBudgetProgram.setComputeUnitLimit({ units: Math.min(1_400_000, 20_000 + model.offerCount * 500) }));
-          if (deposit) { const amount = Buffer.alloc(8); amount.writeBigUInt64LE(deposit); tx.add(ix(program, 3, amount, [meta(market), meta(lane, true), meta(owner.publicKey, false, true), meta(new PublicKey(wallet.source), true), meta(new PublicKey(wallet.vault), true), meta(mint), meta(TOKEN_PROGRAM_ID)])); }
-          const payload = Buffer.alloc(115); createHash("sha256").update(modelId).digest().copy(payload);
+          if (deposit) { const amount = Buffer.alloc(8); amount.writeBigUInt64LE(deposit); tx.add(ix(program, "deposit", amount, [meta(market), meta(lane, true), meta(owner.publicKey, false, true), meta(new PublicKey(wallet.source), true), meta((await PublicKey.findProgramAddress([Buffer.from("vault"), lane.toBytes()], program))[0]), meta(new PublicKey(wallet.vault), true), meta(mint), meta(TOKEN_PROGRAM_ID)])); }
+          const payload = Buffer.alloc(116); createHash("sha256").update(modelId).digest().copy(payload);
           priceFields.forEach((field, index) => payload.writeUInt32LE(settings[field] === undefined ? 0xffffffff : Math.floor(settings[field]! * 1_000_000), 32 + index * 4));
           payload.writeUInt16LE(minSpeed, 44); payload.writeUInt32LE(maxInput, 46); payload.writeUInt32LE(maxOutput, 50); payload[54] = settings.zdrOnly ? 1 : 0;
-          payload.writeBigUInt64LE(reserve, 55); payload.writeUInt32LE(estimatedInput, 63); payload.writeUInt32LE(cached, 67); payload.writeUInt32LE(estimatedOutput, 71); payload.writeBigUInt64LE(generation, 107);
+          payload.writeBigUInt64LE(reserve, 55); payload.writeUInt32LE(estimatedInput, 63); payload.writeUInt32LE(cached, 67); payload.writeUInt32LE(estimatedOutput, 71); payload[107] = 1; payload.writeBigUInt64LE(generation, 108);
           if (prior) Buffer.from(new PublicKey(prior.provider!).toBytes()).copy(payload, 75);
-          tx.add(ix(program, 6, payload, [meta(market), meta(new PublicKey(model.address)), meta(new PublicKey(model.terms)), meta(new PublicKey(model.capacity), true), meta(lane, true), meta(owner.publicKey, false, true), meta(new PublicKey(free.address), true), meta(new PublicKey(free.rentPayer)), meta(new PublicKey(this.cfg.providerList))]));
+          tx.add(ix(program, "reserve_booking", payload, [meta(market), meta(new PublicKey(model.address)), meta(new PublicKey(model.terms)), meta(new PublicKey(model.capacity), true), meta(lane, true), meta(owner.publicKey, false, true), meta(new PublicKey(free.address), true), meta(new PublicKey(free.rentPayer)), meta(new PublicKey(this.cfg.providerList)), meta(model.group ? new PublicKey(model.group) : program)]));
           this.progress(callId, { stage: "booking", message: `Preparing transaction · reserving up to ${atomic(reserve)} USDC…`, booking: free.address }); signal.throwIfAborted();
           let observed: { info: AccountInfo<Uint8Array>; slot: number; source: "stream" | "rpc" } | undefined, wake!: (slot: number) => void;
           const changed = new Promise<number>(resolve => { wake = resolve; });
-          const watch = (info: AccountInfo<Uint8Array> | null, slot: number, source: "stream" | "rpc" = "stream") => { if (info?.owner.equals(program) && info.data.length === 368 && info.data[148] === 0 && Buffer.from(info.data).readBigUInt64LE(152) === generation) { observed = { info, slot, source }; wake(slot); } };
+          const watch = (info: AccountInfo<Uint8Array> | null, slot: number, source: "stream" | "rpc" = "stream") => { if (info?.owner.equals(program) && info.data.length === 472 && info.data[148] === 0 && Buffer.from(info.data).readBigUInt64LE(152) === generation) { observed = { info, slot, source }; wake(slot); } };
           this.watchers.set(free.address, watch);
           if (this.socket?.readyState === WebSocket.OPEN) this.socket.send(JSON.stringify({ watch: free.address }));
           let row: Pending, slot: number, info: AccountInfo<Uint8Array> | null;
