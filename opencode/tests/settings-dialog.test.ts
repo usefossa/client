@@ -8,8 +8,9 @@ import { settingsDialog } from "../src/settings-dialog";
 
 test("packaged dialog keeps navigation, page updates, search and prompts reactive", async () => {
   const base = RGBA.fromHex("#ffffff"), muted = RGBA.fromHex("#888888"), focused = RGBA.fromHex("#444444");
-  const theme = { text: { base, muted, action: { primary: { focused: base } }, formfield: { focused: base, selected: base } }, background: { action: { primary: { focused } }, formfield: { focused }, raised: { base: muted } }, hue: { accent: { 200: base } } };
-  let dialog!: ReturnType<typeof settingsDialog>, commands!: { id: string; run: () => void }[], close: (() => void) | undefined;
+  const destructive = RGBA.fromHex("#aa0000");
+  const theme = { text: { base, muted, action: { primary: { focused: base }, destructive: { focused: base } }, formfield: { focused: base, selected: base } }, background: { action: { primary: { focused }, destructive: { focused: destructive } }, formfield: { focused }, raised: { base: muted } }, hue: { accent: { 200: base } } };
+  let dialog!: ReturnType<typeof settingsDialog>, commands!: { id: string; run: () => void | Promise<void> }[], close: (() => void) | undefined;
   const t = await testRender(() => {
     const [content, setContent] = createSignal<(() => JSX.Element) | undefined>();
     const context = { renderer: useRenderer(), theme: { surface: () => theme }, keymap: { layer: (factory: () => { commands: typeof commands }) => { commands = factory().commands; } }, ui: { dialog: {
@@ -39,6 +40,16 @@ test("packaged dialog keeps navigation, page updates, search and prompts reactiv
     expect(await frame()).toContain("Methodology"); expect(await frame()).not.toContain("Data retention");
     await t.mockInput.typeText("missing"); expect(await frame()).toContain("No results");
     run("back"); expect(await settings).toBeUndefined();
+    const removed: string[] = [], wallets = dialog.select({ title: "Saved wallets", search: true, options: [{ title: "Wallet A", value: "a" }, { title: "Wallet B", value: "b", disabled: true }], onDelete: async id => { removed.push(id); dialog.update("Saved wallets", { options: [{ title: "Wallet A", value: "a" }] }); } });
+    expect(await frame()).toContain("ctrl+d delete");
+    await run("delete"); expect(removed).toEqual([]); expect(await frame()).toContain("Press ctrl+d again to confirm");
+    expect((find(t.renderer.root, "fossa-option-0") as BoxRenderable).backgroundColor.equals(destructive)).toBe(true);
+    run("down"); expect(await frame()).not.toContain("again to confirm");
+    await run("delete"); expect(removed).toEqual([]);
+    await run("delete"); expect(removed).toEqual(["b"]); expect(await frame()).not.toContain("Wallet B");
+    await run("delete"); expect(await frame()).toContain("again to confirm");
+    await t.mockInput.typeText("Wallet"); expect(await frame()).not.toContain("again to confirm");
+    run("back"); expect(await wallets).toBeUndefined();
     const prompt = dialog.prompt({ title: "API endpoint", value: "https://example.com" });
     expect(await frame()).toContain("API endpoint"); expect(await frame()).toContain("https://example.com");
     await t.mockInput.typeText("/v1"); run("submit"); expect(await prompt).toBe("https://example.com/v1");

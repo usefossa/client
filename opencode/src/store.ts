@@ -142,6 +142,22 @@ export class Store {
   lock(id?: string) { for (const [key, secrets] of this.keys) if (!id || key === id) { secrets.owner.fill(0); secrets.lane?.fill(0); Object.values(secrets.bookings).forEach(value => value.fill(0)); this.keys.delete(key); } }
   lockProtected() { for (const id of this.keys.keys()) if (this.security(id).protected) this.lock(id); }
   wallets() { return this.db.query("SELECT id,address,name FROM wallets ORDER BY name").all() as { id: string; address: string; name: string }[]; }
+  deleteWallet(id: string) {
+    const wallet = this.wallets().find(wallet => wallet.id === id);
+    if (!wallet) return [];
+    const ids = this.wallets().filter(row => row.address === wallet.address).map(row => row.id);
+    this.db.transaction(() => {
+      if (this.pending(wallet.address, undefined, true).length) throw new FossaError("WALLET_BUSY", "Recover pending transactions before deleting this wallet.");
+      const rakeback = this.db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='rakeback_settings'").get();
+      for (const key of ids) {
+        this.db.query("DELETE FROM wallets WHERE id=?").run(key);
+        this.db.query("DELETE FROM model_settings WHERE wallet=?").run(key);
+        if (rakeback) this.db.query("DELETE FROM rakeback_settings WHERE wallet=?").run(key);
+      }
+    }).immediate();
+    ids.forEach(key => this.lock(key));
+    return ids;
+  }
   settings(id: string, model: string) {
     const row = this.db.query("SELECT settings FROM model_settings WHERE wallet=? AND model=?").get(id, model) as { settings: string } | null;
     if (row) return validateSettings(JSON.parse(row.settings));

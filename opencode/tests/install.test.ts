@@ -6,7 +6,7 @@ import { parse } from "jsonc-parser";
 import { installConfig } from "../scripts/install";
 
 test("local installation replaces GitHub plugin sources without duplicate registration", () => {
-  const result = JSON.parse(installConfig(JSON.stringify({ plugins: ["github:usefossa/client#v0.10.10::path:opencode", { package: "github:usefossa/client#main::path:opencode", options: { custom: true } }, "other-plugin"] }), "/fixture/fossa"));
+  const result = JSON.parse(installConfig(JSON.stringify({ plugins: ["github:usefossa/client#v0.10.10::path:opencode", "github:usefossa/client#::path:opencode", { package: "github:usefossa/client#main::path:opencode", options: { custom: true } }, "other-plugin"] }), "/fixture/fossa"));
   expect(result.plugins).toHaveLength(2); expect(result.plugins[0]).toBe("other-plugin"); expect(result.plugins[1].package).toBe("/fixture/fossa");
 });
 

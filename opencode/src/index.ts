@@ -188,6 +188,15 @@ export default Plugin.define({
         })().finally(() => { endpointChange = undefined; switching = false; if (restart && !closing) void poll(); });
       }),
       wallets: guarded(async () => ({ wallets: store.wallets() })),
+      deleteWallet: guarded(async input => {
+        const wallet = store.wallets().find(wallet => wallet.id === (input as { id: string }).id);
+        if (!wallet) return { ids: [] };
+        return store.exclusive(wallet.address, async () => {
+          const ids = store.deleteWallet(wallet.id);
+          if (client?.account.wallet === wallet.address) { client.stop(); client = undefined; inventoryHash = ""; }
+          notify(); return { ids };
+        });
+      }),
       routes: guarded(async input => {
         const session = (input as { session: string }).session;
         return { routes: store.pending().filter(row => row.session === session && row.kind === "inference" && row.flow === "primary" && row.provider).map(row => ({ id: row.id, model: row.model, startedAt: row.startedAt ?? row.created, provider: row.providerName ?? catalog?.models.find(model => model.id === row.model)?.offers.find(offer => offer.provider.wallet === row.provider)?.provider.name ?? row.provider! })) };

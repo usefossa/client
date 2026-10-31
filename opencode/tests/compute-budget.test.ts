@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import { ComputeBudgetProgram, Keypair, Transaction, TransactionInstruction, type Connection, type VersionedTransaction } from "@solana/web3.js";
-import { measureCompute } from "../src/compute-budget";
+import { ComputeBudgetProgram, Keypair, Transaction, TransactionInstruction, Connection, type VersionedTransaction } from "@solana/web3.js";
+import { measureCompute, simulationMiddleware } from "../src/compute-budget";
 
 async function transaction(count = 1) {
   const payer = (await Keypair.generate()).publicKey, program = (await Keypair.generate()).publicKey;
@@ -10,6 +10,29 @@ async function transaction(count = 1) {
   return tx;
 }
 const rpc = (value: { unitsConsumed?: bigint; err?: object }, slot = 10n) => ({ simulateTransaction: async () => ({ context: { slot }, value: { err: null, logs: [], ...value } }) }) as unknown as Pick<Connection, "simulateTransaction">;
+
+test("real sdk transport sends explicit unsigned simulation policy", async () => {
+  let calls = 0;
+  const connection = new Connection("http://127.0.0.1:1", { fetchMiddleware: simulationMiddleware, httpHeaders: { authorization: "Bearer fixture" }, fetch: Object.assign(async (_url: unknown, options?: RequestInit) => {
+    const body = JSON.parse(String(options?.body)), [bytes, config] = body.params;
+    calls++;
+    expect(body.method).toBe("simulateTransaction");
+    expect(new Headers(options?.headers).get("authorization")).toBe("Bearer fixture");
+    expect(config).toEqual({ sigVerify: false, encoding: "base64", commitment: "processed", minContextSlot: 10 });
+    expect(Transaction.from(Buffer.from(bytes, "base64")).signatures.every(item => item.signature === null)).toBe(true);
+    if (config.sigVerify !== false) return new Response("Invalid transaction signatures", { status: 400 });
+    return Response.json({ jsonrpc: "2.0", id: body.id, result: { context: { slot: 10 }, value: { err: null, logs: [], unitsConsumed: 10000 } } });
+  }, { preconnect: fetch.preconnect }) });
+  expect(await measureCompute(await transaction(), connection, 10)).toBe(12000);
+  expect(calls).toBe(1);
+});
+
+test("simulation transport preserves explicit signature verification and other rpc requests", () => {
+  for (const body of [{ method: "simulateTransaction", params: ["bytes", { sigVerify: true }] }, { method: "sendTransaction", params: ["bytes", { encoding: "base64" }] }]) {
+    const options = { body: JSON.stringify(body) };
+    simulationMiddleware("http://localhost", options, (_url, forwarded) => expect(JSON.parse(forwarded.body)).toEqual(body));
+  }
+});
 
 test("measures every instruction unsigned using existing blockhash and context", async () => {
   const tx = await transaction(3), hash = tx.recentBlockhash;

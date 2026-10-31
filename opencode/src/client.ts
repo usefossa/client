@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { Connection, Keypair, PublicKey, SystemProgram, Transaction, TransactionInstruction, type AccountInfo } from "@solana/web3.js";
-import { measureCompute } from "./compute-budget";
+import { measureCompute, simulationMiddleware } from "./compute-budget";
 import { createAssociatedTokenAccountIdempotentInstruction, getAssociatedTokenAddress, TOKEN_PROGRAM_ID } from "./token";
 import bs58 from "bs58";
 import { providerError, bookingPending } from "./provider-response";
@@ -46,7 +46,7 @@ export class FossaClient {
     await this.store.autoUnlock(this.account.walletId);
     this.cfg = await config(this.account.apiUrl);
     const endpoint = this.account.rpcUrl || `${this.account.apiUrl}/v1/opencode/rpc`;
-    this.rpc = new Connection(endpoint, { commitment: "processed", disableRetryOnRateLimit: true, ...(this.account.rpcUrl ? { wsEndpoint: this.account.rpcWsUrl } : { httpHeaders: { authorization: `Bearer ${this.account.access}` } }) });
+    this.rpc = new Connection(endpoint, { commitment: "processed", disableRetryOnRateLimit: true, fetchMiddleware: simulationMiddleware, ...(this.account.rpcUrl ? { wsEndpoint: this.account.rpcWsUrl } : { httpHeaders: { authorization: `Bearer ${this.account.access}` } }) });
     await Promise.all([this.refresh(), this.rpc.getGenesisHash().then(hash => { if (hash !== this.cfg.opencode.mainnetGenesisHash) throw new FossaError("WRONG_NETWORK", "Selected RPC does not match the configured Solana network."); })]); this.connect();
     this.timer = setInterval(() => void this.refresh().catch(error => this.publish({ connected: false, stage: "error", message: error instanceof Error ? error.message : "Fossa unavailable." })), this.cfg.opencode.catalogMaxAgeMs / 2);
     this.rakebackTimer = setInterval(() => { void this.recoverPending(); void this.automaticRakeback(); }, 60_000);

@@ -13,6 +13,30 @@ import type { Account } from "../src/types";
 const directories: string[] = [];
 afterEach(() => directories.splice(0).forEach(directory => rmSync(directory, { recursive: true, force: true })));
 
+test("wallet deletion removes duplicate keys and settings, preserves history and unrelated wallets", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "fossa-delete-")); directories.push(directory);
+  const store = new Store(directory), owner = await Keypair.generate(), other = await Keypair.generate();
+  try {
+    for (const [walletId, key] of [["a", owner], ["duplicate", owner], ["other", other]] as const) {
+      await store.save({ walletId, wallet: key.publicKey.toString(), name: walletId } as Account, { owner: [...key.secretKey], bookings: {} });
+      store.setSettings(walletId, "model", store.settings(walletId, "model")); store.setRakeback(walletId, {});
+    }
+    const secret = store.secrets("a");
+    store.put({ id: "pending", wallet: owner.publicKey.toString(), stage: "uncertain", created: 1 } as Pending);
+    expect(() => store.deleteWallet("a")).toThrow("pending transactions");
+    expect(store.wallets()).toHaveLength(3); expect(store.unlocked("a")).toBe(true);
+    store.put({ ...store.request("pending", owner.publicKey.toString())!, stage: "settled", charge: "7" });
+    expect(store.deleteWallet("a")).toEqual(["a", "duplicate"]);
+    expect(store.wallets().map(row => row.id)).toEqual(["other"]);
+    expect(store.unlocked("a")).toBe(false); expect(store.unlocked("duplicate")).toBe(false); expect(store.unlocked("other")).toBe(true);
+    expect(secret.owner.every(byte => byte === 0)).toBe(true);
+    expect(store.db.query("SELECT wallet FROM model_settings").all()).toEqual([{ wallet: "other" }]);
+    expect(store.db.query("SELECT wallet FROM rakeback_settings").all()).toEqual([{ wallet: "other" }]);
+    expect(store.request("pending", owner.publicKey.toString())?.charge).toBe("7");
+    expect(store.deleteWallet("missing")).toEqual([]);
+  } finally { store.close(); }
+});
+
 test("journal terminal accounting survives stale stream, history and timing writes without repeated updates", () => {
   const directory = mkdtempSync(join(tmpdir(), "fossa-monotonic-")); directories.push(directory); const store = new Store(directory);
   try {

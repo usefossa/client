@@ -293,8 +293,20 @@ export default Plugin.define({
                 if (!previous || priority(wallet) > priority(previous)) saved.set(wallet.address, wallet);
               }
               const wallets = [...saved.values()];
-              const selected = await dialog.select({ title: "Saved wallets", search: wallets.length > 8, options: wallets.map(wallet => ({ title: wallet.address, value: wallet.credentialId ?? wallet.id, description: !wallet.credentialId ? "Reconnect with /connect" : !wallet.compatible ? "Uses another API endpoint" : undefined, disabled: !wallet.credentialId || !wallet.compatible })), current: wallets.find(wallet => wallet.active)?.credentialId });
-              if (selected) { await context.client.credential.activate({ credentialID: selected }); await sync(); await refreshModel(); }
+              const choices = () => ({ options: wallets.map(wallet => ({ title: wallet.address, value: wallet.id, description: !wallet.credentialId ? "Reconnect with /connect" : !wallet.compatible ? "Uses another API endpoint" : undefined, disabled: !wallet.credentialId || !wallet.compatible })), current: wallets.find(wallet => wallet.active)?.id });
+              const selected = await dialog.select({ title: "Saved wallets", search: wallets.length > 8, ...choices(), onDelete: async id => {
+                try {
+                  const { ids } = await rpc.deleteWallet({ id }) as { ids: string[] };
+                  for (const entry of credentials.filter(entry => ids.includes(String(entry.value.metadata?.walletId)))) await context.client.credential.remove({ credentialID: entry.id });
+                  for (let index = wallets.length - 1; index >= 0; index--) if (ids.includes(wallets[index].id)) wallets.splice(index, 1);
+                  const remaining = await context.client.credential.list();
+                  for (const wallet of wallets) wallet.active = wallet.compatible && remaining.some(entry => entry.id === wallet.credentialId && entry.active);
+                  dialog.update("Saved wallets", { ...choices(), message: wallets.length ? undefined : "Connect a wallet with /connect." });
+                  await sync(); await refreshModel();
+                } catch (error) { problem(error); }
+              } });
+              const credentialID = wallets.find(wallet => wallet.id === selected)?.credentialId;
+              if (credentialID) { await context.client.credential.activate({ credentialID }); await sync(); await refreshModel(); }
             }
           } catch (error) { problem(error); }
         }

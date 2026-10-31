@@ -11,6 +11,7 @@ export const Fossa = Rpc.define({
     endpoint: { input: { type: "object", properties: { apiUrl: { type: "string" } }, additionalProperties: false }, output: object, errors },
     routes: { input: { type: "object", properties: { session: { type: "string" } }, required: ["session"], additionalProperties: false }, output: object, errors },
     wallets: { input: empty, output: object, errors },
+    deleteWallet: { input: { type: "object", properties: { id: { type: "string" } }, required: ["id"], additionalProperties: false }, output: object, errors },
     unlock: { input: { type: "object", properties: { passphrase: { type: "string" } }, required: ["passphrase"], additionalProperties: false }, output: object, errors },
     lock: { input: empty, output: object, errors },
     security: { input: { type: "object", properties: { action: { enum: ["enable", "disable"] }, passphrase: { type: "string" } }, additionalProperties: false }, output: object, errors },

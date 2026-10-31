@@ -1,5 +1,17 @@
-import { ComputeBudgetProgram, VersionedTransaction, type Connection, type Transaction } from "@solana/web3.js";
+import { ComputeBudgetProgram, VersionedTransaction, type Connection, type ConnectionConfig, type Transaction } from "@solana/web3.js";
 import { FossaError } from "./types";
+
+// web3.js omits sigVerify:false; the authenticated rpc requires it explicitly.
+export const simulationMiddleware: NonNullable<ConnectionConfig["fetchMiddleware"]> = (url, options, next) => {
+  if (typeof options.body === "string" && options.body.includes('"simulateTransaction"')) {
+    const body = JSON.parse(options.body);
+    if (body.method === "simulateTransaction") {
+      body.params[1] = { sigVerify: false, ...body.params[1] };
+      options = { ...options, body: JSON.stringify(body) };
+    }
+  }
+  next(url, options);
+};
 
 export async function measureCompute(tx: Transaction, rpc: Pick<Connection, "simulateTransaction">, slot: number) {
   const instructions = tx.instructions.filter(ix => !ix.programId.equals(ComputeBudgetProgram.programId) || ix.data[0] !== 2);
