@@ -159,8 +159,7 @@ export default Plugin.define({
       const model = await currentModel();
       const items = model.checkpoints ?? [];
       if (!items.length) throw Error("No published model versions are available.");
-      const ordered = items.filter(version => version.order !== null);
-      const selected = await dialog.select({ title: "Model version", current: model.checkpoint, options: items.map(version => ({ title: version.name, value: version.hash, footer: version.order === null ? "Release order unknown" : version === ordered.at(-1) ? "Latest" : version === ordered[0] ? "Earliest" : undefined })) });
+      const selected = await dialog.select({ title: "Model version", current: model.checkpoint, options: items.map(version => ({ title: version.name, value: version.hash, footer: version === items.at(-1) ? "Latest" : version === items[0] ? "Earliest" : undefined })) });
       if (selected) await save(model.id, { modelCheckpoint: selected });
     };
     const modalities = async () => {

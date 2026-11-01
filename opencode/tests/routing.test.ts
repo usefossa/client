@@ -57,12 +57,14 @@ test("advanced requirements select committed versions and enforce per-offer capa
   for (const patch of [{ modelCheckpoint: "0".repeat(64) }, { inputModalities: 0 }, { outputModalities: 16 }, { maxOutputTokens: -1 }, { minContextTokens: 4294967296 }]) expect(() => validateSettings(patch)).toThrow();
 });
 
-test("unordered checkpoints remain explicit options without replacing the latest known release", () => {
+test("missing versions have no separate option and use the earliest published identity", () => {
   const unspecified = { ...offers[0], checkpoint: "09".repeat(32), checkpointName: "Unspecified", checkpointOrder: null };
-  const model = { offers: [unspecified, offers[1]] } as MarketModel;
-  expect(modelCheckpoints(model).map(version => version.order)).toEqual([0, null]);
-  expect(eligible(model, defaultSettings)).toEqual([offers[1]]);
-  expect(eligible(model, { ...defaultSettings, advancedRouting: true, modelCheckpoint: unspecified.checkpoint })).toEqual([unspecified]);
+  const latest = { ...offers[1], checkpoint: "08".repeat(32), checkpointOrder: 1 };
+  const model = { offers: [unspecified, offers[1], latest] } as MarketModel;
+  expect(modelCheckpoints(model).map(version => version.order)).toEqual([0, 1]);
+  expect(eligible(model, defaultSettings)).toEqual([latest]);
+  expect(eligible(model, { ...defaultSettings, advancedRouting: true, modelCheckpoint: unspecified.checkpoint })).toEqual([unspecified, offers[1]]);
+  expect(modelCheckpoints({ offers: [unspecified] } as MarketModel)).toEqual([{ hash: unspecified.checkpoint, name: "Latest", order: 0 }]);
   expect(routingRequirements({ offers: [unspecified] } as MarketModel, defaultSettings).checkpoint).toBe(unspecified.checkpoint);
 });
 

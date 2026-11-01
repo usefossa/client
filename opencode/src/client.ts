@@ -529,12 +529,13 @@ export class FossaClient {
       this.quote();
       admissionWaitMs = Date.now() - admissionAt;
       const best = ranked[0];
+      if (best) { requirements.checkpoint = best.checkpoint; requirements.allowUnversioned = false; }
       const minSpeed = settings.mode === "cheapest" ? settings.minSpeed : Math.max(settings.minSpeed, best?.speed ?? 0);
       const listFeeBps = this.catalog.providerListFeeBps;
       if (!Number.isInteger(listFeeBps) || listFeeBps! < 10 || listFeeBps! > 300 || model.group === undefined) throw new FossaError("CONFIGURATION", "Refresh Fossa protocol configuration before signing.");
       const withListFee = (base: bigint) => base + (base * BigInt(listFeeBps!) + 9999n) / 10000n;
       const maxSpend = best ? withListFee(fee(maxInput, best.inputRate) + fee(maxOutput, best.outputRate) + 1n) : 0n;
-      const offers = ranked.filter(offer => offer.speed >= minSpeed && withListFee(fee(maxInput, offer.inputRate) + fee(maxOutput, offer.outputRate) + 1n) <= maxSpend);
+      const offers = ranked.filter(offer => offer.checkpoint === requirements.checkpoint && offer.speed >= minSpeed && withListFee(fee(maxInput, offer.inputRate) + fee(maxOutput, offer.outputRate) + 1n) <= maxSpend);
       if (!offers.length) { const reason = unavailable(model, settings, maxInput, maxOutput); throw new FossaError("NO_PROVIDER", reason.message, { ...reason.data, catalogSlot: this.catalog.slot }); }
       const reserve = offers.reduce((max, offer) => { const value = withListFee(fee(maxInput, offer.inputRate) + fee(maxOutput, offer.outputRate) + 1n); return value > max ? value : max; }, 0n);
       let wallet = this.availableWallet();

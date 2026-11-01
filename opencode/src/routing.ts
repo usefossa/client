@@ -18,12 +18,15 @@ export const modalityMask = (values: string[] = []) => modalityOptions.reduce((m
 export function modelCheckpoints(model: MarketModel) {
   const checkpoints = new Map<string, { hash: string; name: string; order: number | null }>();
   for (const offer of model.offers) if (offer.active && /^(?!0{64})[a-f0-9]{64}$/.test(offer.checkpoint) && offer.checkpointName && (offer.checkpointOrder === null || Number.isSafeInteger(offer.checkpointOrder) && offer.checkpointOrder >= 0)) checkpoints.set(offer.checkpoint, { hash: offer.checkpoint, name: offer.checkpointName, order: offer.checkpointOrder });
-  return [...checkpoints.values()].sort((a, b) => a.order === null ? Number(b.order !== null) : b.order === null ? -1 : a.order - b.order);
+  const versions = [...checkpoints.values()].filter(version => version.order !== null).sort((a, b) => a.order! - b.order!);
+  return versions.length ? versions.map(version => ({ ...version, name: /^(release|unspecified|unknown)$/i.test(version.name) ? "Latest" : version.name })) : [...checkpoints.values()].slice(0, 1).map(version => ({ ...version, name: "Latest", order: 0 }));
 }
 export function routingRequirements(model: MarketModel, settings: Settings) {
   const versions = modelCheckpoints(model), advanced = settings.advancedRouting;
+  const checkpoint = (advanced && settings.modelCheckpoint ? versions.find(version => version.hash === settings.modelCheckpoint) ?? versions[0] : versions.at(-1))?.hash;
   return {
-    checkpoint: (advanced && versions.find(version => version.hash === settings.modelCheckpoint) || versions.findLast(version => version.order !== null) || versions[0])?.hash,
+    checkpoint,
+    allowUnversioned: Boolean(checkpoint && checkpoint === versions[0]?.hash),
     inputModalities: advanced ? settings.inputModalities ?? 1 : 1,
     outputModalities: advanced ? settings.outputModalities ?? 1 : 1,
     minContext: advanced ? settings.minContextTokens ?? 0 : 0,
@@ -31,8 +34,8 @@ export function routingRequirements(model: MarketModel, settings: Settings) {
   };
 }
 export function modelLimits(model: MarketModel, settings: Settings) {
-  const checkpoint = routingRequirements(model, settings).checkpoint;
-  const offers = model.offers.filter(offer => offer.active && offer.checkpoint === checkpoint);
+  const requirements = routingRequirements(model, settings);
+  const offers = model.offers.filter(offer => offer.active && offerFits(offer, requirements));
   return {
     context: Math.max(0, ...offers.map(offer => offer.contextTokens)),
     input: Math.max(0, ...offers.map(offer => offer.inputBoundTokens)),
@@ -41,7 +44,7 @@ export function modelLimits(model: MarketModel, settings: Settings) {
   };
 }
 export function offerFits(offer: Offer, requirements: ReturnType<typeof routingRequirements>, input = 0, output = 0) {
-  return offer.checkpoint === requirements.checkpoint
+  return (offer.checkpoint === requirements.checkpoint || requirements.allowUnversioned && offer.checkpointOrder === null && /^(?!0{64})[a-f0-9]{64}$/.test(offer.checkpoint))
     && (modalityMask(offer.modalities?.input) & requirements.inputModalities) === requirements.inputModalities
     && (modalityMask(offer.modalities?.output) & requirements.outputModalities) === requirements.outputModalities
     && offer.inputBoundTokens >= input && offer.outputTokens >= output && offer.contextTokens >= Math.max(requirements.minContext, input + output);
