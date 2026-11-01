@@ -11,6 +11,7 @@ export function validateSettings(value: unknown, previous = defaultSettings): Se
   if (typeof settings.advancedRouting !== "boolean" || typeof settings.modelCheckpoint !== "string" || settings.modelCheckpoint !== "" && !/^(?!0{64})[a-f0-9]{64}$/.test(settings.modelCheckpoint)) throw Error("Invalid advanced routing or checkpoint.");
   for (const key of ["inputModalities", "outputModalities"] as const) if (!Number.isInteger(settings[key]) || settings[key]! < 1 || settings[key]! > 15) throw Error("Choose at least one supported modality.");
   for (const key of ["minContextTokens", "maxInputTokens", "maxOutputTokens"] as const) if (settings[key] !== null && (!Number.isSafeInteger(settings[key]) || settings[key]! < 1 || settings[key]! > 0xffffffff)) throw Error("Token limits must be positive whole numbers, or Auto.");
+  if (!settings.advancedRouting) Object.assign(settings, { modelCheckpoint: "", inputModalities: 1, outputModalities: 1, minContextTokens: null, maxInputTokens: null, maxOutputTokens: null });
   return settings;
 }
 export const modalityOptions = [{ label: "Text", bit: 1 }, { label: "Image", bit: 2 }, { label: "Audio", bit: 4 }, { label: "Video", bit: 8 }] as const;
