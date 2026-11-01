@@ -38,7 +38,7 @@ export function installModelPicker(context: Context, suppliedSource?: ModelSourc
     };
     const active = () => context.keymap.commands().some(command => command.id === "model.dialog.favorite");
     let inventory: unknown, cachedModels: { id: string; name: string }[] = [], providers: unknown, cachedCategories = new Set<string>();
-    const models = () => { const next = context.data.location.model.list(context.location); if (next !== inventory) { inventory = next; cachedModels = (next ?? []).filter(model => model.providerID === "fossa"); } return cachedModels; };
+    const models = () => { const next = context.data.location.model.list(context.location); if (next !== inventory) { inventory = next; cachedModels = (next ?? []).filter(model => model.providerID === "fossa").sort((a, b) => b.name.length - a.name.length); } return cachedModels; };
     const categories = () => { const next = context.data.location.provider.list(context.location); if (next !== providers) { providers = next; cachedCategories = new Set(["Recent", "Favorites", ...(next ?? []).map(provider => provider.name)]); } return cachedCategories; };
     let selector: Renderable | undefined, scroll: ScrollBoxRenderable | undefined, category: TextRenderable | undefined;
     let host: Renderable | undefined, left: Renderable["left"], top: Renderable["top"], frame: BoxRenderable | undefined;

@@ -25,25 +25,32 @@ for (const wrappers of [0, 3]) test(`native provider pane matches selector, rece
   const scroll = new ScrollBoxRenderable(t.renderer, { height: 10, scrollX: false }); parent.add(scroll);
   scroll.add(new TextRenderable(t.renderer, { content: "Recent", attributes: 1, fg: accent }));
   const selected = new BoxRenderable(t.renderer, { flexDirection: "row", backgroundColor: focused, height: 1 });
-  selected.add(new TextRenderable(t.renderer, { content: "Fixture model", fg: text }));
+  const selectedName = new TextRenderable(t.renderer, { content: model.name, fg: text });
+  selected.add(selectedName);
   selected.add(new TextRenderable(t.renderer, { content: "Fossa", fg: muted })); scroll.add(selected);
   const other = new BoxRenderable(t.renderer, { flexDirection: "row", height: 1 });
   other.add(new TextRenderable(t.renderer, { content: "Other model", fg: text })); scroll.add(other);
+  const models = [
+    { ...model, id: "fixture/base", name: "Fixture", offers: [...model.offers, { ...model.offers[0], provider: "Base-only provider" }] },
+    model,
+    { ...model, id: "fixture/uc", name: "Fixture model UC", offers: [model.offers[1]] },
+  ].map(item => ({ ...item, providerID: "fossa" }));
   const preference = { modelPane: true };
-  let queries = 0, scan!: (deltaTime: number) => Promise<void>, command!: { id: string; bind: string | false; run: () => void };
+  let queries = 0, requested = "", scan!: (deltaTime: number) => Promise<void>, command!: { id: string; bind: string | false; run: () => void };
   const setFrameCallback = t.renderer.setFrameCallback.bind(t.renderer);
   t.renderer.setFrameCallback = callback => { scan = callback; setFrameCallback(callback); };
   const context = {
-    renderer: t.renderer, client: { rpc: () => ({ model: async () => { queries++; return structuredClone(model); } }) },
+    renderer: t.renderer, client: { rpc: () => ({ model: async ({ model: id }: { model: string }) => { queries++; requested = id; return structuredClone(models.find(item => item.id === id)!); } }) },
     storage: { store: () => [preference, async (update: (draft: typeof preference) => void) => { await Promise.resolve(); update(preference); }] },
     keymap: { commands: () => [{ id: "model.dialog.favorite" }, { id: "occupied" }], shortcuts: (id: string) => id === "occupied" ? ["ctrl+g"] : id === command?.id && command.bind ? [command.bind] : [], layer: (factory: () => { commands: typeof command[] }) => { expect(getOwner()).toBe(owner); command = factory().commands[0]; } },
-    data: { location: { model: { list: () => [{ id: model.id, name: model.name, providerID: "fossa" }] }, provider: { list: () => [{ name: "Fossa" }] } } },
+    data: { location: { model: { list: () => models }, provider: { list: () => [{ name: "Fossa" }] } } },
     theme: { text: { base: text, muted }, surface: () => ({ background: { base, action: { primary: { focused } } }, hue: { accent: { 200: accent }, interactive: { 200: blue } } }) },
   } as unknown as Context;
   let stop = installModelPicker(context);
   const render = async () => { for (let index = 0; index < 4; index++) await t.renderOnce(); };
   try {
     await render();
+    expect(requested).toBe(model.id);
     let frame = find(t.renderer.root, "fossa-picker-frame")!;
     expect(frame).toBeDefined(); expect(frame.parent).toBe(overlay);
     expect(frame.width).toBe(shell.width); expect(frame.height).toBe(shell.height);
@@ -69,6 +76,15 @@ for (const wrappers of [0, 3]) test(`native provider pane matches selector, rece
     expect(find(frame, "fossa-picker-provider-0")).toBe(first);
     console.info(`provider pane: 1000 scans ${elapsed.toFixed(2)}ms, ${rootScans} full-tree scans, ${queries} model query`);
     t.renderer.root.getChildren = getChildren;
+    for (const label of [models[2].name, models[2].name + " Fossa"]) {
+      selectedName.content = label; await render();
+      expect(requested).toBe(models[2].id);
+      const variant = find(t.renderer.root, "fossa-picker-frame")!;
+      const provider = find(variant, "fossa-picker-provider-0")!;
+      expect((provider.getChildren()[1] as TextRenderable).plainText).toBe("Other provider");
+      expect(find(variant, "fossa-picker-provider-1")).toBeUndefined();
+    }
+    selectedName.content = model.name; await render();
     const hide = stop.toggle(); expect(stop.enabled()).toBe(false); await hide; await render();
     expect(find(t.renderer.root, "fossa-picker-frame")).toBeUndefined();
     expect(shell.x).toBe(Math.floor((t.renderer.width - shell.width) / 2));
