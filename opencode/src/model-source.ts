@@ -4,11 +4,11 @@ import { errorMessage, type ModelDetails } from "./types";
 
 type Listener = (value?: ModelDetails, error?: string) => void;
 type Entry = { value?: ModelDetails; at: number; version: number; error?: string; pending?: Promise<ModelDetails>; listeners: Set<Listener> };
-const settings = ["mode", "minSpeed", "maxInputPrice", "maxOutputPrice", "maxCachedPrice", "zdrOnly"] as const;
+const settings = ["mode", "minSpeed", "maxInputPrice", "maxOutputPrice", "maxCachedPrice", "zdrOnly", "advancedRouting", "modelCheckpoint", "inputModalities", "outputModalities", "minContextTokens", "maxInputTokens", "maxOutputTokens"] as const;
 const offers = ["provider", "wallet", "url", "input", "output", "cached", "speed", "zdr"] as const;
 
 export function sameModel(a: ModelDetails | undefined, b: ModelDetails) {
-  return !!a && a.id === b.id && a.name === b.name && settings.every(key => a.settings[key] === b.settings[key])
+  return !!a && a.id === b.id && a.name === b.name && a.checkpoint === b.checkpoint && JSON.stringify(a.checkpoints) === JSON.stringify(b.checkpoints) && settings.every(key => a.settings[key] === b.settings[key])
     && a.offers.length === b.offers.length && a.offers.every((offer, index) => offers.every(key => offer[key] === b.offers[index][key]));
 }
 

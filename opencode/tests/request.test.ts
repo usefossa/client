@@ -53,3 +53,11 @@ test("OpenCode's real chat encoder passes Fossa validation and decodes streamed 
     expect(response.text).toBe("Hello");
   } finally { await ai.dispose(); server.stop(true); }
 });
+
+test("text bounds never clamp away oversized input and combined context stays bounded", () => {
+  const body = { model: config.model, max_tokens: 1024, messages: [{ role: "user", content: "a".repeat(2048) }] };
+  expect(inputBound(body, 1024)).toBeGreaterThan(2048);
+  expect(() => validateBody(body, { ...booking, maxInput: 1024 }, { ...config, context_tokens: 1024 })).toThrow("Input limit");
+  const bound = inputBound(body);
+  expect(() => validateBody(body, { ...booking, maxInput: bound }, { ...config, context_tokens: bound + 1023 })).toThrow("Context limit");
+});

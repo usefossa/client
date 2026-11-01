@@ -12,7 +12,7 @@ for (const action of ["reload", "endpoint"]) for (const phase of ["booking", "st
   let enter!: () => void, release!: () => void;
   const entered = new Promise<void>(resolve => { enter = resolve; }), gate = new Promise<void>(resolve => { release = resolve; });
   const cfg = { programId: owner.publicKey.toString(), market: owner.publicKey.toString(), providerList: owner.publicKey.toString(), usdcMint: owner.publicKey.toString(), opencode: { siteUrl: "http://127.0.0.1:3000", maxInputTokens: 1024, maxRequestBytes: 2200000, pollIntervalMs: 100 } };
-  const catalog = { ready: true, programId: cfg.programId, market: cfg.market, providerList: cfg.providerList, models: [{ id: "fixture/coder", outputTokens: 32 }] };
+  const catalog = { ready: true, programId: cfg.programId, market: cfg.market, providerList: cfg.providerList, models: [{ id: "fixture/coder", outputTokens: 32, offers: [{ checkpoint: "07".repeat(32), checkpointName: "1017", checkpointOrder: 0, active: true, contextTokens: 1024, inputBoundTokens: 1024, outputTokens: 32, modalities: { input: ["text"], output: ["text"] } }] }] };
   const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(request) {
     const path = new URL(request.url).pathname;
     if (path.endsWith("/config")) return Response.json(cfg);

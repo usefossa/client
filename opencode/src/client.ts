@@ -12,7 +12,7 @@ import { recoverable, rakebackDollars } from "./rakeback";
 import { FossaError, type Account, type Catalog, type Chain, type MarketModel, type Offer, type PublicConfig, type RakebackFunds, type RakebackState, type Settings, type Status, type WalletState } from "./types";
 
 export { inputBound } from "./protocol";
-import { eligible, fee, priceFields, rankOffers, settling, unavailable } from "./routing";
+import { eligible, fee, priceFields, rankOffers, settling, unavailable, routingRequirements, offerFits } from "./routing";
 export { eligible, fee } from "./routing";
 const atomic = (value: bigint, decimals = 6) => `${value / 10n ** BigInt(decimals)}.${(value % 10n ** BigInt(decimals)).toString().padStart(decimals, "0")}`;
 const digest = (body: string) => createHash("sha256").update(body).digest("hex");
@@ -41,7 +41,7 @@ export class FossaClient {
   constructor(readonly store: Store, public account: Account, readonly changed: () => void) {}
   publish(patch: Partial<Status>) { this.status = { ...this.status, ...patch }; this.changed(); }
   private progress(id: string, patch: Partial<Status>) { if (this.status.requestId === id) this.publish(patch); }
-  settings(model = "") { return this.store.settings(this.account.walletId, model); }
+  settings(model = "") { const canonical = this.catalog?.aliases?.[model] ?? model; return this.store.settings(this.account.walletId, canonical, Object.entries(this.catalog?.aliases ?? {}).filter(([, target]) => target === canonical).map(([alias]) => alias)); }
   async start() {
     await this.store.autoUnlock(this.account.walletId);
     this.cfg = await config(this.account.apiUrl);
@@ -143,7 +143,7 @@ export class FossaClient {
     if (user && !ready) throw new FossaError("ACCOUNT_INVALID", "Fossa user account identity is invalid.");
     const counter = Buffer.alloc(8); if (ready) user!.data.copy(counter, 0, 112, 120);
     const validToken = token && token.owner.equals(TOKEN_PROGRAM_ID) && token.data.length === 165 && token.data.subarray(0, 32).equals(mint.toBytes()) && token.data.subarray(32, 64).equals(owner.toBytes());
-    return { wallet: this.account.wallet, lane: this.account.lane, source: source.toBase58(), vault: vault.toBase58(), ready, lamports: String(balance?.lamports ?? 0), usdcAtomic: validToken ? token.data.readBigUInt64LE(64).toString() : "0", freeAtomic: ready ? user!.data.readBigUInt64LE(72).toString() : "0", generation: counter.readBigUInt64LE().toString(), slot: Number(result.context.slot), bookings: [...pool].flatMap((address, index) => { const value = values[index + 3]; if (!value || !value.lamports && !value.data.length) return []; if (!value.owner.equals(program) || value.data.length !== 472 || !value.data.subarray(0, 8).equals(discriminator("account:Booking")) || !value.data.subarray(8, 40).equals(owner.toBytes()) || !value.data.subarray(192, 224).equals(lane.toBytes())) throw new FossaError("ACCOUNT_INVALID", "Booking pool identity is invalid."); return [{ address, status: value.data[148], generation: value.data.readBigUInt64LE(152).toString(), rentPayer: new PublicKey(value.data.subarray(256, 288)).toBase58() }]; }) };
+    return { wallet: this.account.wallet, lane: this.account.lane, source: source.toBase58(), vault: vault.toBase58(), ready, lamports: String(balance?.lamports ?? 0), usdcAtomic: validToken ? token.data.readBigUInt64LE(64).toString() : "0", freeAtomic: ready ? user!.data.readBigUInt64LE(72).toString() : "0", generation: counter.readBigUInt64LE().toString(), slot: Number(result.context.slot), bookings: [...pool].flatMap((address, index) => { const value = values[index + 3]; if (!value || !value.lamports && !value.data.length) return []; if (!value.owner.equals(program) || value.data.length !== 520 || !value.data.subarray(0, 8).equals(discriminator("account:FilteredBooking")) || !value.data.subarray(8, 40).equals(owner.toBytes()) || !value.data.subarray(192, 224).equals(lane.toBytes())) throw new FossaError("ACCOUNT_INVALID", "Booking pool identity is invalid."); return [{ address, status: value.data[148], generation: value.data.readBigUInt64LE(152).toString(), rentPayer: new PublicKey(value.data.subarray(256, 288)).toBase58() }]; }) };
   }
   private get scope() { return this.cfg ? { program: this.cfg.programId, market: this.cfg.market, lane: this.account.lane, genesis: this.cfg.opencode.mainnetGenesisHash, mint: this.cfg.usdcMint } : undefined; }
   private rows(active = false) { return this.store.pending(this.account.wallet, this.scope, active); }
@@ -217,14 +217,14 @@ export class FossaClient {
           const [statuses, account] = await Promise.all([
             this.signatureStatuses([row.signature]),
             wake && row.kind === "inference" ? this.rpc.getAccountInfoAndContext(new PublicKey(row.booking), "processed").then(account => {
-              if (!done && account.value?.owner.equals(new PublicKey(this.cfg.programId)) && account.value.data.length === 472 && account.value.data[148] === 0 && Buffer.from(account.value.data).readBigUInt64LE(152).toString() === row.generation) this.watchers.get(row.booking)?.(account.value, Number(account.context.slot), "rpc");
+              if (!done && account.value?.owner.equals(new PublicKey(this.cfg.programId)) && account.value.data.length === 520 && account.value.data[148] === 0 && Buffer.from(account.value.data).readBigUInt64LE(152).toString() === row.generation) this.watchers.get(row.booking)?.(account.value, Number(account.context.slot), "rpc");
               return account;
             }) : undefined,
           ]);
           const [status] = statuses;
           if (done) return 0;
           if (status?.err && ["confirmed", "finalized"].includes(status.confirmationStatus ?? "")) { row.stage = "failed"; row.error = JSON.stringify(status.err, (_key, value) => typeof value === "bigint" ? value.toString() : value); this.store.put(row); throw new FossaError("TRANSACTION_FAILED", row.kind === "rakeback" ? `Rakeback transaction failed: ${row.signature}. No funds were moved.` : `Fossa transaction failed: ${row.signature}. No booking USDC was charged.`); }
-          if (account?.value?.owner.equals(new PublicKey(this.cfg.programId)) && account.value.data.length === 472 && account.value.data[148] === 0 && Buffer.from(account.value.data).readBigUInt64LE(152).toString() === row.generation) {
+          if (account?.value?.owner.equals(new PublicKey(this.cfg.programId)) && account.value.data.length === 520 && account.value.data[148] === 0 && Buffer.from(account.value.data).readBigUInt64LE(152).toString() === row.generation) {
             this.watchers.get(row.booking)?.(account.value, Number(account.context.slot), "rpc");
             return Number(account.context.slot);
           }
@@ -313,7 +313,7 @@ export class FossaClient {
   }
   private inspect(info: AccountInfo<Uint8Array>, row: Pending, model: Pick<MarketModel, "address">) {
     const data = Buffer.from(info.data);
-    if (!info.owner.equals(new PublicKey(this.cfg.programId)) || data.length !== 472 || !data.subarray(0, 8).equals(discriminator("account:Booking")) || !data.subarray(8, 40).equals(new PublicKey(this.account.wallet).toBytes()) || !data.subarray(72, 104).equals(new PublicKey(this.cfg.market).toBytes()) || !data.subarray(192, 224).equals(new PublicKey(this.account.lane).toBytes()) || !data.subarray(224, 256).equals(new PublicKey(model.address).toBytes()) || data.readBigUInt64LE(152).toString() !== row.generation || row.providerList && !data.subarray(320, 352).equals(new PublicKey(row.providerList).toBytes())) throw new FossaError("BOOKING_CHANGED", "Booking identity or generation changed. Reconcile before retrying.");
+    if (!info.owner.equals(new PublicKey(this.cfg.programId)) || data.length !== 520 || !data.subarray(0, 8).equals(discriminator("account:FilteredBooking")) || !data.subarray(8, 40).equals(new PublicKey(this.account.wallet).toBytes()) || !data.subarray(72, 104).equals(new PublicKey(this.cfg.market).toBytes()) || !data.subarray(192, 224).equals(new PublicKey(this.account.lane).toBytes()) || !data.subarray(224, 256).equals(new PublicKey(model.address).toBytes()) || data.readBigUInt64LE(152).toString() !== row.generation || row.providerList && !data.subarray(320, 352).equals(new PublicKey(row.providerList).toBytes())) throw new FossaError("BOOKING_CHANGED", "Booking identity or generation changed. Reconcile before retrying.");
     return data;
   }
   private async rakebackFunds(): Promise<RakebackFunds> {
@@ -383,7 +383,7 @@ export class FossaClient {
   }
   private bookingData(info: AccountInfo<Uint8Array>) {
     const data = Buffer.from(info.data);
-    if (!info.owner.equals(new PublicKey(this.cfg.programId)) || data.length !== 472 || !data.subarray(0, 8).equals(discriminator("account:Booking")) || !data.subarray(8, 40).equals(new PublicKey(this.account.wallet).toBytes()) || !data.subarray(72, 104).equals(new PublicKey(this.cfg.market).toBytes()) || !data.subarray(192, 224).equals(new PublicKey(this.account.lane).toBytes())) throw new FossaError("ACCOUNT_INVALID", "Rakeback booking does not belong to this wallet and market.");
+    if (!info.owner.equals(new PublicKey(this.cfg.programId)) || data.length !== 520 || !data.subarray(0, 8).equals(discriminator("account:FilteredBooking")) || !data.subarray(8, 40).equals(new PublicKey(this.account.wallet).toBytes()) || !data.subarray(72, 104).equals(new PublicKey(this.cfg.market).toBytes()) || !data.subarray(192, 224).equals(new PublicKey(this.account.lane).toBytes())) throw new FossaError("ACCOUNT_INVALID", "Rakeback booking does not belong to this wallet and market.");
     return data;
   }
   rakeback(automatic = false) {
@@ -446,6 +446,8 @@ export class FossaClient {
   }
   async request(callId: string, modelId: string, body: string, session: string, kind: string, signal: AbortSignal, timing: { modelRequestAt?: number; transportReceivedAt?: number } = {}) {
     signal.throwIfAborted();
+    const canonical = this.catalog?.aliases?.[modelId], savedRequest = this.localRequest(callId);
+    if (canonical && (!savedRequest || savedRequest.model === canonical)) { const parsed = JSON.parse(body); if (parsed.model === modelId) { parsed.model = canonical; body = JSON.stringify(parsed); } modelId = canonical; }
     const startedAt = Date.now();
     const previousRequest = this.store.previousInference(callId, this.account.wallet, session, kind, this.scope);
     const previousResponseFinishedAt = previousRequest?.responseFinishedAt;
@@ -481,42 +483,46 @@ export class FossaClient {
       let model = this.catalog.models.find(model => model.id === modelId);
       if (!model) throw new FossaError("MODEL_UNAVAILABLE", "Selected Fossa model is unavailable.");
       const parsed = JSON.parse(body) as { messages: unknown[]; tools?: unknown[]; max_tokens?: number; max_completion_tokens?: number };
-      const maxInput = inputBound(parsed, model.contextTokens), maxOutput = parsed.max_tokens ?? parsed.max_completion_tokens;
-      if (!Array.isArray(parsed.messages) || !Number.isSafeInteger(maxOutput) || !maxOutput || maxOutput < 1 || maxOutput > (model.outputTokens ?? 0) || maxInput > Math.min(model.inputBoundTokens ?? model.contextTokens ?? 0, this.cfg.opencode.maxInputTokens)) throw new FossaError("TOKEN_LIMIT", "Request exceeds model or Fossa token bounds. Reduce context or output limit before retrying.");
-      validateBody(parsed, { maxInput, maxOutput, claimEnd: Number.MAX_SAFE_INTEGER }, { model: model.id, speed_tps: 1, context_tokens: model.contextTokens ?? 0, max_input_bound: model.inputBoundTokens ?? model.contextTokens, output_tokens: model.outputTokens ?? 0, tools: model.capabilities?.tools === true, input: model.modalities.input, effort: model.variants?.map(variant => variant.body.reasoning_effort) ?? model.effort });
+      const settings = this.settings(modelId), requirements = routingRequirements(model, settings);
+      if (!requirements.checkpoint) throw new FossaError("NO_PROVIDER", "No provider matches this model’s published version.");
+      if (Array.isArray(parsed.messages) && parsed.messages.some((message: any) => Array.isArray(message?.content) && message.content.some((part: any) => part?.type === "image_url"))) requirements.inputModalities |= 2;
+      const candidates = model.offers.filter(offer => offer.active && offerFits(offer, requirements));
+      const context = Math.max(0, ...candidates.map(offer => offer.contextTokens)), inputCap = Math.max(0, ...candidates.map(offer => offer.inputBoundTokens)), outputCap = Math.max(0, ...candidates.map(offer => offer.outputTokens));
+      const requiredInput = inputBound(parsed, context), maxInput = settings.advancedRouting && settings.maxInputTokens != null ? settings.maxInputTokens : requiredInput;
+      const requestedOutput = parsed.max_tokens ?? parsed.max_completion_tokens, maxOutput = settings.advancedRouting && settings.maxOutputTokens != null ? settings.maxOutputTokens : requestedOutput;
+      if (!Array.isArray(parsed.messages) || !Number.isSafeInteger(maxOutput) || !maxOutput || maxOutput < 1 || maxOutput > outputCap || requiredInput > maxInput || maxInput > Math.min(inputCap, this.cfg.opencode.maxInputTokens) || maxInput + maxOutput > context || !Number.isSafeInteger(requestedOutput) || !requestedOutput || requestedOutput > maxOutput) throw new FossaError("TOKEN_LIMIT", "Request exceeds eligible provider token bounds. Reduce context or output limit before retrying.");
+      validateBody(parsed, { maxInput, maxOutput, claimEnd: Number.MAX_SAFE_INTEGER }, { model: model.id, speed_tps: 1, context_tokens: context, max_input_bound: inputCap, output_tokens: outputCap, tools: model.capabilities?.tools === true, input: candidates.flatMap(offer => offer.modalities.input), effort: model.variants?.map(variant => variant.body.reasoning_effort) ?? model.effort });
       if (this.rows(true).some(row => ["prepared", "sent", "uncertain"].includes(row.stage))) {
         const recoveryAt = Date.now();
         await this.reconcile(true);
         recoveryWaitMs += Date.now() - recoveryAt;
         if (this.rows(true).some(row => ["prepared", "sent", "uncertain"].includes(row.stage))) throw new FossaError("RECOVERY_PENDING", "Previous payment is recovering automatically. Try again once its release is confirmed.");
       }
-      const estimatedInput = Math.min(maxInput, Math.ceil(Buffer.byteLength(body) / 4)), estimatedOutput = Math.min(maxOutput, 256);
-      const prefix = (messages: number) => digest(JSON.stringify({ ...parsed, messages: parsed.messages.slice(0, messages) }));
+      const estimatedInput = Math.min(maxInput, Math.ceil(Buffer.byteLength(body) / 4)), estimatedOutput = Math.min(requestedOutput, 256);
+      const prefix = (messages: number) => digest(JSON.stringify({ ...parsed, checkpoint: requirements.checkpoint, messages: parsed.messages.slice(0, messages) }));
       let prior: Pending | undefined;
       const prefixes = new Map<number, string>();
       for (const saved of this.store.cacheHistory(this.account.wallet, session, kind, modelId, this.scope)) {
         const row = JSON.parse((saved as { state: string }).state) as Pending;
-        if (!row.provider || !row.usage || !row.cache || row.cache.messages > parsed.messages.length) continue;
+        if (row.checkpoint !== requirements.checkpoint || !row.provider || !row.usage || !row.cache || row.cache.messages > parsed.messages.length) continue;
         if (!prefixes.has(row.cache.messages)) prefixes.set(row.cache.messages, prefix(row.cache.messages));
         if (row.cache.prefix === prefixes.get(row.cache.messages)) { prior = row; break; }
       }
       const continued = prior && parsed.messages.slice(prior.cache!.messages).some(message => message && typeof message === "object" && "role" in message && message.role === "assistant");
       const cached = prior ? Math.min(estimatedInput, prior.usage!.input + (continued ? prior.usage!.output : 0), Math.ceil(Buffer.byteLength(JSON.stringify(parsed.messages.slice(0, Math.max(prior.cache!.messages, parsed.messages.length - 1)))) / 4)) : 0;
       const estimate = { input: estimatedInput, cached, output: estimatedOutput, provider: prior?.provider };
-      const settings = this.settings(modelId);
-      let ranked = rankOffers(eligible(model, settings), settings, estimate);
+      let ranked = rankOffers(eligible(model, settings, maxInput, maxOutput, requirements), settings, estimate);
       const admissionAt = Date.now(), admissionDeadline = admissionAt + this.cfg.opencode.requestTimeoutMs;
       let refresh = true;
-      while (!ranked.length && settling(model, settings) && Date.now() < admissionDeadline) {
+      while (!ranked.length && settling(model, settings, maxInput, maxOutput, requirements) && Date.now() < admissionDeadline) {
         signal.throwIfAborted();
         if (this.stopped) throw new FossaError("FOSSA_STOPPED", "Fossa connection closed.");
         this.progress(callId, { stage: "settling", message: "Waiting for provider capacity…" });
         if (refresh) { const version = this.catalogVersion; this.updateCatalog(await api<Catalog>(this.account.apiUrl, "/market/catalog", { signal }), version); }
         model = this.catalog.models.find(value => value.id === modelId);
         if (!model) throw new FossaError("MODEL_UNAVAILABLE", "Selected Fossa model is unavailable.");
-        if (maxInput > Math.min(model.inputBoundTokens ?? model.contextTokens ?? 0, this.cfg.opencode.maxInputTokens) || maxOutput > (model.outputTokens ?? 0)) throw new FossaError("TOKEN_LIMIT", "Request exceeds updated model token bounds.");
-        ranked = rankOffers(eligible(model, settings), settings, estimate);
-        if (!ranked.length && settling(model, settings)) refresh = !await this.waitForCatalog(signal, admissionDeadline);
+        ranked = rankOffers(eligible(model, settings, maxInput, maxOutput, requirements), settings, estimate);
+        if (!ranked.length && settling(model, settings, maxInput, maxOutput, requirements)) refresh = !await this.waitForCatalog(signal, admissionDeadline);
       }
       signal.throwIfAborted();
       if (this.stopped) throw new FossaError("FOSSA_STOPPED", "Fossa connection closed.");
@@ -560,21 +566,23 @@ export class FossaClient {
           if (!Number.isSafeInteger(model.offerCount) || model.offerCount < model.offers.length || model.offerCount > 4096) throw new FossaError("CONFIGURATION", "Fossa model book size is invalid.");
           const tx = new Transaction();
           if (deposit) { const amount = Buffer.alloc(8); amount.writeBigUInt64LE(deposit); tx.add(ix(program, "deposit", amount, [meta(market), meta(lane, true), meta(owner.publicKey, false, true), meta(new PublicKey(wallet.source), true), meta((await PublicKey.findProgramAddress([Buffer.from("vault"), lane.toBytes()], program))[0]), meta(new PublicKey(wallet.vault), true), meta(mint), meta(TOKEN_PROGRAM_ID)])); }
-          const payload = Buffer.alloc(116); createHash("sha256").update(modelId).digest().copy(payload);
+          const payload = Buffer.alloc(155); createHash("sha256").update(modelId).digest().copy(payload);
           priceFields.forEach((field, index) => payload.writeUInt32LE(settings[field] === undefined ? 0xffffffff : Math.floor(settings[field]! * 1_000_000), 32 + index * 4));
           payload.writeUInt16LE(minSpeed, 44); payload.writeUInt32LE(maxInput, 46); payload.writeUInt32LE(maxOutput, 50); payload[54] = settings.zdrOnly ? 1 : 0;
-          payload.writeBigUInt64LE(reserve, 55); payload.writeUInt32LE(estimatedInput, 63); payload.writeUInt32LE(cached, 67); payload.writeUInt32LE(estimatedOutput, 71); payload[107] = 1; payload.writeBigUInt64LE(generation, 108);
+          payload.writeBigUInt64LE(reserve, 55); payload.writeUInt32LE(estimatedInput, 63); payload.writeUInt32LE(cached, 67); payload.writeUInt32LE(estimatedOutput, 71);
+          Buffer.from(requirements.checkpoint, "hex").copy(payload, 107); payload[139] = requirements.inputModalities; payload[140] = requirements.outputModalities;
+          payload.writeUInt32LE(requirements.minContext, 141); payload[145] = Number(requirements.limitsConfigured); payload[146] = 1; payload.writeBigUInt64LE(generation, 147);
           if (prior) Buffer.from(new PublicKey(prior.provider!).toBytes()).copy(payload, 75);
           tx.add(ix(program, "reserve_booking", payload, [meta(market), meta(new PublicKey(model.address)), meta(new PublicKey(model.terms)), meta(new PublicKey(model.capacity), true), meta(lane, true), meta(owner.publicKey, false, true), meta(new PublicKey(free.address), true), meta(new PublicKey(free.rentPayer)), meta(new PublicKey(this.cfg.providerList)), meta(model.group ? new PublicKey(model.group) : program)]));
           this.progress(callId, { stage: "booking", message: `Preparing transaction · reserving up to ${atomic(reserve)} USDC…`, booking: free.address }); signal.throwIfAborted();
           let observed: { info: AccountInfo<Uint8Array>; slot: number; source: "stream" | "rpc" } | undefined, wake!: (slot: number) => void;
           const changed = new Promise<number>(resolve => { wake = resolve; });
-          const watch = (info: AccountInfo<Uint8Array> | null, slot: number, source: "stream" | "rpc" = "stream") => { if (info?.owner.equals(program) && info.data.length === 472 && info.data[148] === 0 && Buffer.from(info.data).readBigUInt64LE(152) === generation) { observed = { info, slot, source }; wake(slot); } };
+          const watch = (info: AccountInfo<Uint8Array> | null, slot: number, source: "stream" | "rpc" = "stream") => { if (info?.owner.equals(program) && info.data.length === 520 && info.data[148] === 0 && Buffer.from(info.data).readBigUInt64LE(152) === generation) { observed = { info, slot, source }; wake(slot); } };
           this.watchers.set(free.address, watch);
           if (this.socket?.readyState === WebSocket.OPEN) this.socket.send(JSON.stringify({ watch: free.address }));
           let row: Pending, slot: number, info: AccountInfo<Uint8Array> | null;
           try {
-            row = await this.journal(tx, [owner], { id: callId, wallet: this.account.wallet, model: modelId, bodyHash: hash, providerList: this.cfg.providerList, cache: { messages: parsed.messages.length, prefix: prefix(parsed.messages.length) }, session, kind: "inference", flow: kind, booking: free.address, generation: generation.toString(), reserve: reserve.toString(), deposit: deposit.toString(), startedAt, ...requestTiming, walletLockMs, recoveryWaitMs, admissionWaitMs, bookingPoolWaitMs }, 0, signal);
+            row = await this.journal(tx, [owner], { id: callId, wallet: this.account.wallet, model: modelId, checkpoint: requirements.checkpoint, bodyHash: hash, providerList: this.cfg.providerList, cache: { messages: parsed.messages.length, prefix: prefix(parsed.messages.length) }, session, kind: "inference", flow: kind, booking: free.address, generation: generation.toString(), reserve: reserve.toString(), deposit: deposit.toString(), startedAt, ...requestTiming, walletLockMs, recoveryWaitMs, admissionWaitMs, bookingPoolWaitMs }, 0, signal);
             slot = await this.processed(row, signal, changed);
             row.processedSlot = slot; this.store.put(row);
             this.progress(callId, { stage: "matched", message: "Transaction confirmed · matching provider…" });
@@ -600,7 +608,11 @@ export class FossaClient {
           const data = this.inspect(info, row, model);
           if (data[148] !== 0) throw new FossaError("BOOKING_CHANGED", "Booking is no longer available for inference.");
           const provider = new PublicKey(data.subarray(40, 72)).toBase58(), offer = offers.find(offer => offer.provider.wallet === provider && offer.slot === data.readUInt32LE(352));
-          if (!offer?.provider.endpoint || data.readBigUInt64LE(104) > reserve) throw new FossaError("BOOKING_CHANGED", "Matched provider does not satisfy the authorized request.");
+          if (!offer?.provider.endpoint || data.readBigUInt64LE(104) > reserve
+            || !data.subarray(472, 504).equals(Buffer.from(requirements.checkpoint, "hex")) || data.readUInt32LE(504) < Math.max(requirements.minContext, maxInput + maxOutput)
+            || data.readUInt32LE(508) < maxInput || data.readUInt32LE(512) < maxOutput
+            || (data[516] & requirements.inputModalities) !== requirements.inputModalities || (data[517] & requirements.outputModalities) !== requirements.outputModalities
+            || data[518] !== requirements.inputModalities || data[519] !== requirements.outputModalities) throw new FossaError("BOOKING_CHANGED", "Matched provider does not satisfy the authorized request.");
           row.provider = provider; row.providerName = offer.provider.name; row.endpoint = safeUrl(offer.provider.endpoint, "provider endpoint"); row.reserve = data.readBigUInt64LE(104).toString(); row.claimEnd = Number(data.readBigInt64LE(132)); row.stage = "matched"; this.store.put(row);
           this.progress(callId, { stage: "matched", provider: offer.provider.name, message: `Matched ${offer.provider.name}` });
           void this.refresh().catch(() => {});

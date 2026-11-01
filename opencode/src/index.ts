@@ -8,7 +8,7 @@ import { importWallet, quickConnect } from "./auth";
 import { FossaClient } from "./client";
 import { Fossa } from "./rpc";
 import { localStore } from "./store";
-import { defaultSettings, eligible, rankOffers, validateSettings } from "./routing";
+import { defaultSettings, eligible, rankOffers, validateSettings, modelCheckpoints, routingRequirements, modelLimits } from "./routing";
 import { FossaError, type Account, type Catalog, type PublicConfig, type Settings, type Status } from "./types";
 
 const drainKey = Symbol.for("fossa.opencode.transport-drain");
@@ -91,13 +91,16 @@ export default Plugin.define({
           const modelRequestAt = Number.isSafeInteger(hookAt) && hookAt > 0 && hookAt <= transportReceivedAt ? hookAt : undefined;
           value = await requireClient();
           if (!store.unlocked(value.account.walletId)) throw new FossaError("WALLET_LOCKED", "Enter your passphrase to unlock your Fossa wallet, then send your message again.");
-          const parsed = await request.json() as Record<string, unknown>, model = catalog?.models.find(model => model.id === parsed.model);
+          const parsed = await request.json() as Record<string, unknown>;
+          if (typeof parsed.model === "string") parsed.model = catalog?.aliases?.[parsed.model] ?? parsed.model;
+          const model = catalog?.models.find(model => model.id === parsed.model);
           if (!model) throw new FossaError("MODEL_UNAVAILABLE", "Fossa model is no longer available.");
           if (Array.isArray(parsed.tools) && parsed.tools.length && !model.capabilities?.tools) throw new FossaError("TOOLS_UNAVAILABLE", "Selected provider does not support coding tools.");
           const requested = parsed.max_tokens ?? parsed.max_completion_tokens;
           if (requested !== undefined && (!Number.isSafeInteger(requested) || Number(requested) < 1)) throw new FossaError("TOKEN_LIMIT", "Invalid output token limit.");
           delete parsed.max_completion_tokens;
-          parsed.max_tokens = Math.min(typeof requested === "number" ? requested : model.settings?.maxTokens ?? model.outputTokens ?? 0, model.outputTokens ?? 0);
+          const limits = modelLimits(model, value.settings(model.id));
+          parsed.max_tokens = Math.min(typeof requested === "number" ? requested : model.settings?.maxTokens ?? limits.output, limits.output);
           const body = JSON.stringify(parsed);
           const routed = await value.request(call, model.id, body, request.headers.get("x-fossa-session") ?? "", request.headers.get("x-fossa-kind") ?? "primary", request.signal, { modelRequestAt, transportReceivedAt });
           const outbound = new Request(routed.url, { method: "POST", headers: routed.headers, body: routed.body, signal: AbortSignal.any([request.signal, AbortSignal.timeout(Math.max(1, routed.deadline - Date.now()))]), redirect: "error" });
@@ -127,14 +130,14 @@ export default Plugin.define({
     }
     const models = () => cfg ? (catalog?.models ?? []).filter(model => model.contextTokens && model.outputTokens && model.offers.some(offer => offer.active)).map(model => {
       const settings = client?.settings(model.id) ?? defaultSettings;
-      const price = rankOffers(eligible(model, settings), settings)[0];
+      const price = rankOffers(eligible(model, settings), settings)[0], limits = modelLimits(model, settings);
       return Model.Info.make({ ...Model.Info.default(providerID, Model.ID.make(model.id)), name: model.name,
         package: Provider.Package.make("@opencode/ai/providers/openai-compatible"),
-        capabilities: { tools: model.capabilities?.tools === true, input: model.modalities.input, output: model.modalities.output },
+        capabilities: { tools: model.capabilities?.tools === true, input: limits.modalities.input, output: limits.modalities.output },
         compatibility: { reasoningField: "reasoning_content", maxTokensField: "max_tokens", requireFinishReason: true },
-        limit: { context: model.contextTokens!, output: model.outputTokens! },
+        limit: { context: limits.context, output: limits.output },
         variants: (model.variants ?? (model.effort ?? []).map(id => ({ id, body: { reasoning_effort: id } }))).map(variant => ({ ...variant, id: Model.VariantID.make(variant.id) })),
-        settings: { ...model.settings, maxTokens: Math.min(model.settings?.maxTokens ?? model.outputTokens!, model.outputTokens!) },
+        settings: { ...model.settings, maxTokens: Math.min(model.settings?.maxTokens ?? limits.output, limits.output) },
         body: model.variants?.at(-1)?.body ?? {},
         cost: price ? [{ input: Model.Cost.fields.input.make(price.inputRate / 1_000_000), output: Model.Cost.fields.input.make(price.outputRate / 1_000_000), cache: { read: Model.Cost.fields.input.make(price.cachedRate / 1_000_000), write: Model.Cost.fields.input.make(price.inputRate / 1_000_000) } }] : [],
       });
@@ -213,16 +216,17 @@ export default Plugin.define({
         return store.security(value.account.walletId);
       }),
       settings: guarded(async input => {
-        const { model: modelId, ...patch } = input as Record<string, unknown>;
+        const { model: requestedId, ...patch } = input as Record<string, unknown>;
+        const modelId = typeof requestedId === "string" ? catalog?.aliases?.[requestedId] ?? requestedId : requestedId;
         if (typeof modelId !== "string" || !catalog?.models.some(model => model.id === modelId)) throw Error("Select a Fossa model first.");
         const value = await requireClient(), settings = validateSettings(patch, value.settings(modelId));
         store.setSettings(value.account.walletId, modelId, settings); notify(); await ctx.provider.reload(); return { settings };
       }),
       model: guarded(async input => {
-        const modelId = (input as { model: string }).model, value = await requireClient(), model = value.catalog?.models.find(model => model.id === modelId);
+        const requestedId = (input as { model: string }).model, modelId = catalog?.aliases?.[requestedId] ?? requestedId, value = await requireClient(), model = value.catalog?.models.find(model => model.id === modelId);
         if (!model) throw Error("Fossa model unavailable.");
         const settings = value.settings(modelId);
-        return { id: model.id, name: model.name, settings, outputTokens: model.outputTokens, offers: rankOffers(eligible(model, settings), settings).map(offer => ({ provider: offer.provider.name, wallet: offer.provider.wallet, url: cfg!.opencode.deviceConnect === false ? "" : new URL(`/?provider=${encodeURIComponent(offer.provider.wallet)}`, cfg!.opencode.siteUrl).href, input: offer.inputRate / 1_000_000, cached: offer.cachedRate / 1_000_000, output: offer.outputRate / 1_000_000, speed: offer.speed, zdr: offer.private })) };
+        return { id: model.id, name: model.name, settings, checkpoints: modelCheckpoints(model), checkpoint: routingRequirements(model, settings).checkpoint, outputTokens: modelLimits(model, settings).output, offers: rankOffers(eligible(model, settings), settings).map(offer => ({ provider: offer.provider.name, wallet: offer.provider.wallet, url: cfg!.opencode.deviceConnect === false ? "" : new URL(`/?provider=${encodeURIComponent(offer.provider.wallet)}`, cfg!.opencode.siteUrl).href, input: offer.inputRate / 1_000_000, cached: offer.cachedRate / 1_000_000, output: offer.outputRate / 1_000_000, speed: offer.speed, zdr: offer.private })) };
       }),
       recover: guarded(async () => {
         const value = await requireClient(); return value.rakeback();

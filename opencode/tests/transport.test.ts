@@ -14,7 +14,7 @@ test("transport bounds every provider error and preserves uncertain payment reco
   const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(request) {
     const path = new URL(request.url).pathname;
     if (path.endsWith("/config")) return Response.json(cfg);
-    if (path.endsWith("/catalog")) return Response.json({ ready: true, programId: cfg.programId, market: cfg.market, providerList: cfg.providerList, models: [{ id: "fixture/coder", outputTokens: 32 }] });
+    if (path.endsWith("/catalog")) return Response.json({ ready: true, programId: cfg.programId, market: cfg.market, providerList: cfg.providerList, models: [{ id: "fixture/coder", outputTokens: 32, offers: [{ checkpoint: "07".repeat(32), checkpointName: "1017", checkpointOrder: 0, active: true, contextTokens: 1024, inputBoundTokens: 1024, outputTokens: 32, modalities: { input: ["text"], output: ["text"] } }] }] });
     return new Response(oversized ? "x".repeat(65_537) : JSON.stringify({ error: { message: "Try later", code: "unavailable" } }), { status, headers: { "content-type": "application/json", "retry-after": "5" } });
   } });
   const account = { walletId: "fixture", wallet: owner.publicKey.toString(), lane: owner.publicKey.toString(), name: "Fixture", apiUrl: server.url.origin, access: "fixture", refresh: "fixture", expires: Date.now() + 60000 };

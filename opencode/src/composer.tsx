@@ -8,7 +8,7 @@ import type { ModelDetails } from "./types";
 type Mount = { anchor?: BoxRenderable; sample?: TextRenderable; normal: () => boolean; top?: BoxRenderable; bottom?: BoxRenderable; balance?: TextRenderable; inputs?: readonly unknown[] };
 const remove = (node?: Renderable) => { if (node && !node.isDestroyed) { node.parent?.remove(node); node.destroyRecursively(); } };
 
-export function installComposer(context: Context, details: () => ModelDetails | undefined, balance: () => string, openPrice: () => void, openSpeed: () => void, error: () => string | undefined) {
+export function installComposer(context: Context, details: () => ModelDetails | undefined, balance: () => string, openPrice: () => void, openSpeed: () => void, error: () => string | undefined, advanced?: { version: () => void; modalities: () => void; limits: () => void }) {
   const mounts = new Set<Mount>();
   const clear = (mount: Mount) => { remove(mount.top); remove(mount.bottom); mount.top = undefined; mount.bottom = undefined; mount.balance = undefined; mount.inputs = undefined; };
   const stopSlot = context.ui.slot({ append: "prompt.footer", render: input => {
@@ -53,6 +53,13 @@ export function installComposer(context: Context, details: () => ModelDetails | 
         const auto = !value || [value.settings.maxInputPrice, value.settings.maxCachedPrice, value.settings.maxOutputPrice].every(item => item === undefined);
         control("Price", auto ? "Auto" : "Custom", openPrice);
         control("Speed", value?.settings.minSpeed ? `${value.settings.minSpeed} T/S` : "Auto", openSpeed);
+        if (value?.settings.advancedRouting && advanced) {
+          const version = value.checkpoints?.find(version => version.hash === value.checkpoint);
+          const mask = (value.settings.inputModalities ?? 1) | (value.settings.outputModalities ?? 1), count = [1, 2, 4, 8].filter(bit => mask & bit).length;
+          control("Version", version?.name ?? "—", advanced.version);
+          control("Modalities", mask === 1 ? "Text" : `${count} Active`, advanced.modalities);
+          control("Limits", [value.settings.minContextTokens, value.settings.maxInputTokens, value.settings.maxOutputTokens].some(limit => limit != null) ? "Custom" : "Auto", advanced.limits);
+        }
         controls.add(new Box(context.renderer, { flexGrow: 1 }));
         mount.balance = new Text(context.renderer, { id: "fossa-composer-balance", content: available, fg: theme.text.base, flexShrink: 0, wrapMode: "none" });
         controls.add(mount.balance); prompt.add(mount.bottom, prompt.getChildren().indexOf(footer));

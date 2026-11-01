@@ -2,11 +2,11 @@ import { expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { defaultSettings, eligible, rankOffers, validateSettings } from "../src/routing";
+import { defaultSettings, eligible, modelCheckpoints, rankOffers, routingRequirements, validateSettings } from "../src/routing";
 import { Store } from "../src/store";
 import type { MarketModel, Offer } from "../src/types";
 
-const offer = (slot: number, rate: number, speed: number, zdr = false): Offer => ({ slot, provider: { wallet: `provider-${slot}`, name: `Provider ${slot}`, endpoint: "https://provider.invalid/v1/chat/completions" }, inputRate: rate, cachedRate: rate, outputRate: rate, speed, available: true, active: true, private: zdr, capacity: 10, activeBookings: 0 });
+const offer = (slot: number, rate: number, speed: number, zdr = false): Offer => ({ checkpoint: "07".repeat(32), checkpointId: "example/model@1017", checkpointName: "1017", checkpointOrder: 0, modalities: { input: ["text"], output: ["text"] }, contextTokens: 65536, inputBoundTokens: 65536, outputTokens: 8192, slot, provider: { wallet: `provider-${slot}`, name: `Provider ${slot}`, endpoint: "https://provider.invalid/v1/chat/completions" }, inputRate: rate, cachedRate: rate, outputRate: rate, speed, available: true, active: true, private: zdr, capacity: 10, activeBookings: 0 });
 const offers = [offer(0, 1000000, 10), offer(1, 2000000, 50, true), offer(2, 9000000, 100)];
 
 test("routing modes rank distinct offers and enforce price, speed, ZDR, and capacity", () => {
@@ -42,4 +42,37 @@ test("request cost includes cached history only for its provider and respects ex
   expect(rankOffers(eligible(model, settings), settings, estimate)[0].slot).toBe(0);
   expect(rankOffers(model.offers, settings, { ...estimate, provider: "missing" })[0].slot).toBe(1);
   expect(rankOffers(eligible(model, { ...settings, maxInputPrice: 1 }), settings, estimate)[0].slot).toBe(1);
+});
+
+test("advanced requirements select committed versions and enforce per-offer capabilities and limits", () => {
+  const earlier = { ...offers[0], checkpoint: "08".repeat(32), checkpointName: "0905", checkpointOrder: 0 };
+  const latest = { ...offers[1], checkpointOrder: 1, modalities: { input: ["text", "image"], output: ["text"] } };
+  const model = { offers: [earlier, latest] } as MarketModel;
+  expect(eligible(model, defaultSettings)).toEqual([latest]);
+  const settings = validateSettings({ advancedRouting: true, modelCheckpoint: earlier.checkpoint });
+  expect(eligible(model, settings)).toEqual([earlier]);
+  expect(eligible(model, { ...settings, modelCheckpoint: latest.checkpoint, inputModalities: 3 })).toEqual([latest]);
+  expect(eligible(model, { ...settings, minContextTokens: 131072 })).toEqual([]);
+  expect(eligible(model, settings, 64000, 2000)).toEqual([]);
+  for (const patch of [{ modelCheckpoint: "0".repeat(64) }, { inputModalities: 0 }, { outputModalities: 16 }, { maxOutputTokens: -1 }, { minContextTokens: 4294967296 }]) expect(() => validateSettings(patch)).toThrow();
+});
+
+test("unordered checkpoints remain explicit options without replacing the latest known release", () => {
+  const unspecified = { ...offers[0], checkpoint: "09".repeat(32), checkpointName: "Unspecified", checkpointOrder: null };
+  const model = { offers: [unspecified, offers[1]] } as MarketModel;
+  expect(modelCheckpoints(model).map(version => version.order)).toEqual([0, null]);
+  expect(eligible(model, defaultSettings)).toEqual([offers[1]]);
+  expect(eligible(model, { ...defaultSettings, advancedRouting: true, modelCheckpoint: unspecified.checkpoint })).toEqual([unspecified]);
+  expect(routingRequirements({ offers: [unspecified] } as MarketModel, defaultSettings).checkpoint).toBe(unspecified.checkpoint);
+});
+
+test("canonical model settings reuse a retired alias without replacing newer settings", () => {
+  const directory = mkdtempSync(join(tmpdir(), "fossa-routing-alias-")), store = new Store(directory);
+  try {
+    store.setSettings("wallet", "retired", { ...defaultSettings, minSpeed: 123 });
+    expect(store.settings("wallet", "canonical", ["retired"]).minSpeed).toBe(123);
+    store.setSettings("wallet", "canonical", { ...defaultSettings, minSpeed: 456 });
+    expect(store.settings("wallet", "canonical", ["retired"]).minSpeed).toBe(456);
+    expect(store.settings("wallet", "retired").minSpeed).toBe(123);
+  } finally { store.close(); rmSync(directory, { recursive: true, force: true }); }
 });

@@ -9,6 +9,7 @@ import { installMessageFooters } from "./message-footer";
 import { settingsDialog } from "./settings-dialog";
 import { openProvider, price } from "./provider-row";
 import { defaultRakeback, rakebackAmounts, rakebackDollars, rakebackIntervals } from "./rakeback";
+import { modalityOptions } from "./routing";
 import { errorMessage, type FilterField, type ModelDetails, type RakebackSettings, type RakebackState, type Settings, type Status, type UnlockRequest } from "./types";
 
 const dollars = (value?: string) => value === undefined ? "$—" : `$${(Number(value) / 1_000_000).toFixed(2)}`;
@@ -149,6 +150,49 @@ export default Plugin.define({
       const value = await dialog.select({ title: "Data retention", current: model.settings.zdrOnly ? "on" : "off", options: [{ title: "Off", value: "off" }, { title: "Zero data retention only", value: "on" }] });
       if (value) await save(model.id, { zdrOnly: value === "on" });
     };
+    const advanced = async () => {
+      const model = await currentModel();
+      const selected = await dialog.select({ title: "Advanced options", current: model.settings.advancedRouting ? "on" : "off", options: [{ title: "On", value: "on" }, { title: "Off", value: "off" }] });
+      if (selected) await save(model.id, { advancedRouting: selected === "on" });
+    };
+    const versions = async () => {
+      const model = await currentModel();
+      const items = model.checkpoints ?? [];
+      if (!items.length) throw Error("No published model versions are available.");
+      const ordered = items.filter(version => version.order !== null);
+      const selected = await dialog.select({ title: "Model version", current: model.checkpoint, options: items.map(version => ({ title: version.name, value: version.hash, footer: version.order === null ? "Release order unknown" : version === ordered.at(-1) ? "Latest" : version === ordered[0] ? "Earliest" : undefined })) });
+      if (selected) await save(model.id, { modelCheckpoint: selected });
+    };
+    const modalities = async () => {
+      while (dialog.active() && !stopped) {
+        const model = await currentModel();
+        const direction = await dialog.select({ title: "Modalities", options: [{ title: "Input", value: "inputModalities", footer: "You send" }, { title: "Output", value: "outputModalities", footer: "Model returns" }] });
+        if (!direction) return;
+        const key = direction as "inputModalities" | "outputModalities";
+        while (dialog.active() && !stopped) {
+          const current = await currentModel(), mask = current.settings[key] ?? 1;
+          const selected = await dialog.select({ title: key === "inputModalities" ? "Input modalities" : "Output modalities", options: modalityOptions.map(option => ({ title: option.label, value: String(option.bit), footer: mask & option.bit ? "On" : "Off" })) });
+          if (!selected) break;
+          const next = mask ^ Number(selected);
+          if (next) await save(model.id, { [key]: next });
+        }
+      }
+    };
+    const tokenLimits = async () => {
+      const fields = [{ key: "minContextTokens", title: "Minimum context", description: "Provider must fit at least this many input + output tokens." }, { key: "maxInputTokens", title: "Maximum input", description: "Most tokens you plan to send, including chat history." }, { key: "maxOutputTokens", title: "Maximum output", description: "Most tokens the model may generate." }] as const;
+      while (dialog.active() && !stopped) {
+        const model = await currentModel();
+        const selected = await dialog.select({ title: "Token limits", options: [{ title: "Auto", value: "auto", footer: "No manual limits" }, ...fields.map(field => ({ title: field.title, value: field.key, footer: model.settings[field.key] == null ? "Auto" : String(model.settings[field.key]) }))] });
+        if (!selected) return;
+        if (selected === "auto") { await save(model.id, { minContextTokens: null, maxInputTokens: null, maxOutputTokens: null }); continue; }
+        const field = fields.find(field => field.key === selected)!;
+        const raw = await dialog.prompt({ title: field.title, description: `${field.description} Leave blank for Auto.`, value: model.settings[field.key] == null ? "" : String(model.settings[field.key]), placeholder: "Auto" });
+        if (raw === undefined) continue;
+        const value = raw.trim() ? Number(raw) : null;
+        if (value !== null && (!Number.isSafeInteger(value) || value < 1 || value > 0xffffffff)) { problem(Error("Enter a positive whole token count, or leave blank for Auto.")); continue; }
+        await save(model.id, { [field.key]: value });
+      }
+    };
     const rakeback = async () => {
       let info: RakebackState = { ...defaultRakeback, availableAtomic: "0", processing: false, needsRecovery: false, message: "" };
       let loaded = false, editing = false, refreshing = false, running = false, closed = false;
@@ -253,6 +297,8 @@ export default Plugin.define({
         { title: "Saved wallets", value: "wallets", category: "Wallet" },
         { title: "Rakeback", value: "rakeback", category: "Wallet", footer: amount === undefined ? "—" : rakebackDollars(amount), loading: amountLoading },
         { title: "Methodology", value: "methodology", category: "Routing", footer: settings ? settings.mode[0].toUpperCase() + settings.mode.slice(1) : "—", loading: !settings && modelLoading },
+        { title: "Advanced options", value: "advanced", category: "Routing", footer: settings?.advancedRouting ? "On" : "Off", loading: !settings && modelLoading },
+        ...(settings?.advancedRouting ? [{ title: "Model version", value: "version", category: "Routing" }, { title: "Modalities", value: "modalities", category: "Routing" }, { title: "Token limits", value: "limits", category: "Routing" }] : []),
         { title: "Data retention", value: "retention", category: "Routing", footer: settings ? settings.zdrOnly ? "Zero data retention only" : "Off" : "—", loading: !settings && modelLoading },
         { title: "API endpoint", value: "endpoint", category: "Routing" },
         { title: "Model pane", value: "model-pane", category: "Appearance", footer: stopModels.enabled() ? "On" : "Off" },
@@ -276,6 +322,10 @@ export default Plugin.define({
             else if (value === "security") await security();
             else if (value === "endpoint") await endpoint();
             else if (value === "methodology") await methodology();
+            else if (value === "advanced") await advanced();
+            else if (value === "version") await versions();
+            else if (value === "modalities") await modalities();
+            else if (value === "limits") await tokenLimits();
             else if (value === "retention") await retention();
             else if (value === "rakeback" || value === "recover") await rakeback();
             else if (value === "model-pane") {
@@ -318,7 +368,7 @@ export default Plugin.define({
       { id: "fossa.unlock", title: "Unlock Fossa wallet", group: "Fossa", palette: true, enabled: () => state().security?.protected === true && !state().security?.unlocked, run: external(async () => { await unlock(); }) },
       { id: "fossa.lock", title: "Lock Fossa wallet", group: "Fossa", palette: true, enabled: () => state().security?.protected === true && state().security?.unlocked === true, run: external(async () => { await rpc.lock({}); await sync(); }) },
     ] }));
-    const stopComposer = installComposer(context, details, () => dollars(state().balanceAtomic), openPrice, openSpeed, modelError);
+    const stopComposer = installComposer(context, details, () => dollars(state().balanceAtomic), openPrice, openSpeed, modelError, { version: external(versions), modalities: external(modalities), limits: external(tokenLimits) });
     const stopFooters = installMessageFooters(context);
     return () => { stopped = true; clearInterval(timer); stopEvents(); stopUnlock(); stopFooters(); stopComposer(); stopModels(); models.dispose(); dialog.close(); };
   },

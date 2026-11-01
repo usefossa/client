@@ -19,7 +19,7 @@ test("provider preview shows connection failures and recovers without stale offe
       model: { current: () => ({ providerID: "fossa", modelID: model.id }) }, router: { current: () => ({ type: "home" }) },
       slot: (input: { render: typeof slot }) => { slot = input.render; return () => {}; },
     } } as unknown as Context;
-    stop = installComposer(context, () => details, () => "$0.00", () => {}, () => {}, () => error);
+    stop = installComposer(context, () => details, () => "$0.00", () => {}, () => {}, () => error, { version: () => {}, modalities: () => {}, limits: () => {} });
     return jsx("box", { width: "100%", get children() { return jsx("box", { get children() { return slot({ mode: "normal" }); } }); } });
   }, { width: 100, height: 20 });
   const frame = async () => { await draw(0); await t.renderOnce(); return t.captureCharFrame(); };
@@ -33,6 +33,8 @@ test("provider preview shows connection failures and recovers without stale offe
     expect(await frame()).toContain(error); expect(await frame()).not.toContain("Fixture provider");
     error = undefined;
     expect(await frame()).toContain("Fixture provider");
+    details = { ...model, settings: { ...model.settings, advancedRouting: true, inputModalities: 3, outputModalities: 1, minContextTokens: 32768 }, checkpoint: "07".repeat(32), checkpoints: [{ hash: "07".repeat(32), name: "1017", order: 0 }] };
+    const advanced = await frame(); expect(advanced).toContain("Version  1017"); expect(advanced).toContain("2 Active"); expect(advanced).toContain("Limits  Custom");
     details = { ...model, offers: [] };
     expect(await frame()).toContain("No providers match your filters.");
   } finally { stop(); await t.dispose(); }

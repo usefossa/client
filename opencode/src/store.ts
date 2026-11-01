@@ -15,7 +15,7 @@ export type JournalScope = { program: string; market: string; lane: string; gene
 const terminalStages = "'settled','released','failed','expired'";
 const scopeWhere = "json_extract(state,'$.scope.program')=? AND json_extract(state,'$.scope.market')=? AND json_extract(state,'$.scope.lane')=? AND json_extract(state,'$.scope.genesis')=? AND json_extract(state,'$.scope.mint')=?";
 const scopeValues = (scope: JournalScope) => [scope.program, scope.market, scope.lane, scope.genesis ?? "", scope.mint ?? ""];
-export interface Pending { scope?: JournalScope; providerList?: string; source?: string; rentLamports?: string; previousRequestId?: string; previousResponseFinishedAt?: number; requestGapMs?: number; gapToSubmitMs?: number; gapToProviderMs?: number; modelRequestAt?: number; transportReceivedAt?: number; walletLockMs?: number; recoveryWaitMs?: number; admissionWaitMs?: number; bookingPoolWaitMs?: number; bookingObservedAt?: number; providerDispatchedAt?: number; responseHeadersAt?: number; firstByteAt?: number; responseDoneAt?: number; responseFinishedAt?: number; responseCompleted?: boolean; settlementSlot?: number; settledAt?: number; confirmationMs?: number; cancelRequested?: boolean; cancelSent?: boolean; id: string; wallet: string; model: string; bodyHash: string; cache?: { messages: number; prefix: string }; kind: string; flow?: string; session: string; booking: string; generation: string; signature: string; transaction: string; expiry: number; reserve: string; stage: string; provider?: string; providerName?: string; endpoint?: string; claimEnd?: number; charge?: string; deposit?: string; withdrawal?: string; refund?: string; feeLamports?: string; processedSlot?: number; startedAt?: number; submittedAt?: number; prepareMs?: number; broadcastMs?: number; processedMs?: number; bookingSource?: "stream" | "rpc"; dispatchStarted?: boolean; providerRequestMs?: number; sendToProviderMs?: number; usage?: { input: number; cached: number; output: number }; created: number; error?: string }
+export interface Pending { checkpoint?: string; scope?: JournalScope; providerList?: string; source?: string; rentLamports?: string; previousRequestId?: string; previousResponseFinishedAt?: number; requestGapMs?: number; gapToSubmitMs?: number; gapToProviderMs?: number; modelRequestAt?: number; transportReceivedAt?: number; walletLockMs?: number; recoveryWaitMs?: number; admissionWaitMs?: number; bookingPoolWaitMs?: number; bookingObservedAt?: number; providerDispatchedAt?: number; responseHeadersAt?: number; firstByteAt?: number; responseDoneAt?: number; responseFinishedAt?: number; responseCompleted?: boolean; settlementSlot?: number; settledAt?: number; confirmationMs?: number; cancelRequested?: boolean; cancelSent?: boolean; id: string; wallet: string; model: string; bodyHash: string; cache?: { messages: number; prefix: string }; kind: string; flow?: string; session: string; booking: string; generation: string; signature: string; transaction: string; expiry: number; reserve: string; stage: string; provider?: string; providerName?: string; endpoint?: string; claimEnd?: number; charge?: string; deposit?: string; withdrawal?: string; refund?: string; feeLamports?: string; processedSlot?: number; startedAt?: number; submittedAt?: number; prepareMs?: number; broadcastMs?: number; processedMs?: number; bookingSource?: "stream" | "rpc"; dispatchStarted?: boolean; providerRequestMs?: number; sendToProviderMs?: number; usage?: { input: number; cached: number; output: number }; created: number; error?: string }
 
 export function validatePassphrase(value: unknown): asserts value is string {
   if (typeof value !== "string" || value.length < 3) throw new FossaError("WEAK_PASSPHRASE", "Use a local wallet passphrase of at least 3 characters.");
@@ -56,7 +56,7 @@ export class Store {
           if (!at || !keys[at[2]]?.isSigner || keys[at[2]].pubkey.toString() !== row.wallet) return [];
           if (native) {
             if (keys.length !== ({ 1: 6, 3: 8, 6: 10, 10: 8, 26: 6 } as Record<number, number>)[op]) return [];
-            if (op === 6 ? ix.data.length !== 124 || ix.data[115] !== 1 || Buffer.from(ix.data).readBigUInt64LE(116).toString() !== row.generation : ix.data.length !== ([3, 10].includes(op) ? 16 : 8)) return [];
+            if (op === 6 ? ![124, 163].includes(ix.data.length) || ix.data[ix.data.length - 9] !== 1 || Buffer.from(ix.data).readBigUInt64LE(ix.data.length - 8).toString() !== row.generation : ix.data.length !== ([3, 10].includes(op) ? 16 : 8)) return [];
           } else {
             if ((op === 6 ? ![8, 9].includes(keys.length) : keys.length !== ({ 1: 4, 3: 7, 10: 8, 26: 5 } as Record<number, number>)[op]) || (op !== 6 && ix.data.length !== ([3, 10].includes(op) ? 9 : 1))) return [];
             if (op === 6 && (![108, 116].includes(ix.data.length) || (ix.data.length === 116 ? Buffer.from(ix.data).readBigUInt64LE(108).toString() : "0") !== row.generation)) return [];
@@ -158,8 +158,9 @@ export class Store {
     ids.forEach(key => this.lock(key));
     return ids;
   }
-  settings(id: string, model: string) {
-    const row = this.db.query("SELECT settings FROM model_settings WHERE wallet=? AND model=?").get(id, model) as { settings: string } | null;
+  settings(id: string, model: string, aliases: string[] = []) {
+    const read = (name: string) => this.db.query("SELECT settings FROM model_settings WHERE wallet=? AND model=?").get(id, name) as { settings: string } | null;
+    const row = read(model) ?? aliases.map(read).find(Boolean);
     if (row) return validateSettings(JSON.parse(row.settings));
     const legacy = this.db.query("SELECT settings FROM wallets WHERE id=?").get(id) as { settings: string | null } | null;
     const old = legacy?.settings ? JSON.parse(legacy.settings) : {};

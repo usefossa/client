@@ -22,7 +22,7 @@ async function fixture(customError = 2, retries = 0) {
   const owner = await Keypair.generate(), lane = await Keypair.generate(), booking = await Keypair.generate(), provider = await Keypair.generate(), program = (await Keypair.generate()).publicKey, market = (await Keypair.generate()).publicKey, model = (await PublicKey.findProgramAddress([Buffer.from("model"), market.toBytes(), createHash("sha256").update("fixture/coder").digest()], program))[0], mint = (await Keypair.generate()).publicKey;
   const source = await getAssociatedTokenAddress(mint, owner.publicKey), vault = await getAssociatedTokenAddress(mint, (await PublicKey.findProgramAddress([Buffer.from("vault"), lane.publicKey.toBytes()], program))[0], true);
   const userData = Buffer.alloc(128); userData.set(discriminator("account:User")); Buffer.from(owner.publicKey.toBytes()).copy(userData, 8); Buffer.from(market.toBytes()).copy(userData, 40); Buffer.from(vault.toBytes()).copy(userData, 80);
-  const bookData = Buffer.alloc(472); bookData.set(discriminator("account:Booking")); Buffer.from(owner.publicKey.toBytes()).copy(bookData, 8); Buffer.from(market.toBytes()).copy(bookData, 72); Buffer.from(lane.publicKey.toBytes()).copy(bookData, 192); Buffer.from(owner.publicKey.toBytes()).copy(bookData, 256); bookData[148] = 5;
+  const bookData = Buffer.alloc(520); bookData.set(discriminator("account:FilteredBooking")); Buffer.from(owner.publicKey.toBytes()).copy(bookData, 8); Buffer.from(market.toBytes()).copy(bookData, 72); Buffer.from(lane.publicKey.toBytes()).copy(bookData, 192); Buffer.from(owner.publicKey.toBytes()).copy(bookData, 256); bookData[148] = 5;
   const tokenData = Buffer.alloc(165); Buffer.from(mint.toBytes()).copy(tokenData); Buffer.from(owner.publicKey.toBytes()).copy(tokenData, 32); tokenData.writeBigUInt64LE(10_000_000n, 64);
   const modelData = Buffer.alloc(176); modelData.set(discriminator("account:Model")); Buffer.from(market.toBytes()).copy(modelData, 8);
   let signature = "", submitted = 0, lostFirst = false, hideStatus = false, catalogReads = 0;
@@ -77,7 +77,7 @@ async function fixture(customError = 2, retries = 0) {
     else if (body.method === "getSignatureStatuses") result = { context: { slot: 100 }, value: body.params[0].map((value: string) => !hideStatus && (confirmedSignatures.has(value) || failures.has(value)) ? { slot: 100, confirmations: 1, confirmationStatus: "confirmed", err: failures.has(value) ? { InstructionError: [1, { Custom: customError }] } : null } : null) };
     else if (body.method === "getProgramAccounts") {
       const options = body.params[1];
-      expect(options.commitment).toBe(options.filters.some((filter: { dataSize?: number; memcmp?: { offset: number; bytes: string } }) => filter.memcmp?.offset === 0 && Buffer.from(bs58.decode(filter.memcmp.bytes)).equals(discriminator("account:Booking"))) ? "processed" : "confirmed");
+      expect(options.commitment).toBe(options.filters.some((filter: { dataSize?: number; memcmp?: { offset: number; bytes: string } }) => filter.memcmp?.offset === 0 && Buffer.from(bs58.decode(filter.memcmp.bytes)).equals(discriminator("account:FilteredBooking"))) ? "processed" : "confirmed");
       expect(options.withContext).toBe(true);
       expect(Number(options.minContextSlot ?? 0)).toBeLessThanOrEqual(100);
       result = { context: { slot: 100 }, value: [...records].filter(([, value]) => value.owner.toString() === body.params[0] && options.filters.every((filter: { dataSize?: number; memcmp?: { offset: number; bytes: string } }) => filter.dataSize === undefined ? filter.memcmp && value.data.subarray(filter.memcmp.offset, filter.memcmp.offset + bs58.decode(filter.memcmp.bytes).length).equals(bs58.decode(filter.memcmp.bytes)) : value.data.length === filter.dataSize)).map(([pubkey, value]) => ({ pubkey, account: { data: [value.data.toString("base64"), "base64"], owner: value.owner.toString(), lamports: 1000, executable: false, rentEpoch: 0 } })) };
@@ -96,21 +96,21 @@ async function fixture(customError = 2, retries = 0) {
       submitted++;
       const instruction = tx.instructions.find(value => value.programId.equals(program) && Buffer.from(value.data).subarray(0, 8).equals(discriminator("global:reserve_booking")))!;
       if (instruction.keys[6].pubkey.toString() === deleted) { failures.add(signature); return json({ jsonrpc: "2.0", id: body.id, result: signature }); }
-      expect(instruction.data.length).toBe(124);
+      expect(instruction.data.length).toBe(163);
       expect(Buffer.from(tx.instructions[0].data).readUInt32LE(1)).toBe(34_000);
-      expect(instruction.keys).toHaveLength(10); expect(instruction.keys[9].pubkey.toString()).toBe(catalog.models[0].group ?? program.toString()); expect(instruction.data[115]).toBe(1);
+      expect(instruction.keys).toHaveLength(10); expect(instruction.keys[9].pubkey.toString()).toBe(catalog.models[0].group ?? program.toString()); expect(instruction.data[154]).toBe(1);
       expect(instruction.keys[8].pubkey.toString()).toBe(cfg.providerList);
       expect(instruction.keys[8].isWritable).toBe(false);
       expect(instruction.keys[8].isSigner).toBe(false);
       const payload = Buffer.from(instruction.data.subarray(8));
       const target = records.get(instruction.keys[6].pubkey.toString())!.data;
-      const matched = catalog.models[0].offers.find(offer => offer.inputRate <= payload.readUInt32LE(32) && offer.cachedRate <= payload.readUInt32LE(36) && offer.outputRate <= payload.readUInt32LE(40) && offer.speed >= payload.readUInt16LE(44) && (!payload[54] || offer.private));
+      const matched = catalog.models[0].offers.find(offer => offer.inputRate <= payload.readUInt32LE(32) && offer.cachedRate <= payload.readUInt32LE(36) && offer.outputRate <= payload.readUInt32LE(40) && offer.speed >= payload.readUInt16LE(44) && (!payload[54] || offer.private) && offer.checkpoint === payload.subarray(107, 139).toString("hex") && offer.contextTokens >= Math.max(payload.readUInt32LE(141), payload.readUInt32LE(46) + payload.readUInt32LE(50)));
       if (!matched) throw Error("Fixture found no provider matching signed routing constraints");
       const depositInstruction = tx.instructions.find(value => value.programId.equals(program) && Buffer.from(value.data).subarray(0, 8).equals(discriminator("global:deposit"))), deposit = depositInstruction ? Buffer.from(depositInstruction.data).readBigUInt64LE(8) : 0n;
       tokenData.writeBigUInt64LE(tokenData.readBigUInt64LE(64) - deposit, 64);
       userData.writeBigUInt64LE(userData.readBigUInt64LE(72) + deposit - payload.readBigUInt64LE(55), 72);
       Buffer.from(new PublicKey(cfg.providerList).toBytes()).copy(target, 320);
-      Buffer.from(model.toBytes()).copy(target, 224); Buffer.from(new PublicKey(matched.provider.wallet).toBytes()).copy(target, 40); payload.subarray(108, 116).copy(target, 152); payload.subarray(55, 63).copy(target, 104); payload.subarray(46, 50).copy(target, 124); payload.subarray(50, 54).copy(target, 128); target.writeBigInt64LE(BigInt(Math.floor(Date.now() / 1000) + 300 + Math.ceil(payload.readUInt32LE(50) / matched.speed)), 132); target[148] = 0; target.copy(userData, 112, 152, 160); target.writeUInt32LE(matched.slot, 352);
+      Buffer.from(model.toBytes()).copy(target, 224); Buffer.from(new PublicKey(matched.provider.wallet).toBytes()).copy(target, 40); payload.subarray(147, 155).copy(target, 152); payload.subarray(55, 63).copy(target, 104); payload.subarray(46, 50).copy(target, 124); payload.subarray(50, 54).copy(target, 128); target.writeBigInt64LE(BigInt(Math.floor(Date.now() / 1000) + 300 + Math.ceil(payload.readUInt32LE(50) / matched.speed)), 132); target[148] = 0; target.copy(userData, 112, 152, 160); target.writeUInt32LE(matched.slot, 352); payload.subarray(107, 139).copy(target, 472); target.writeUInt32LE(matched.contextTokens, 504); target.writeUInt32LE(matched.inputBoundTokens, 508); target.writeUInt32LE(matched.outputTokens, 512); target.set([1, 1, payload[139], payload[140]], 516);
       for (const socket of sockets) if (socket.data.subscribed) socket.send(JSON.stringify({ jsonrpc: "2.0", method: "accountNotification", params: { subscription: 1, result: { context: { slot: 100 }, value: { data: [target.toString("base64"), "base64"], owner: program.toString(), lamports: 1000, executable: false, rentEpoch: 0 } } } }));
       for (const socket of sockets) if (socket.data.live && socket.data.watch === instruction.keys[6].pubkey.toString()) socket.send(JSON.stringify({ type: "booking", address: socket.data.watch, data: { owner: program.toString(), data: target.toString("base64"), slot: 100 } }));
       if (lostFirst) { lostFirst = false; return new Response("Submission response lost", { status: 503 }); }
@@ -119,7 +119,7 @@ async function fixture(customError = 2, retries = 0) {
     return json({ jsonrpc: "2.0", id: body.id, result });
   } });
   cfg = { programId: program.toString(), market: market.toString(), providerList: (await Keypair.generate()).publicKey.toString(), usdcMint: mint.toString(), solanaRpc: server.url.origin + "/rpc", opencode: { siteUrl: server.url.origin, deviceTtlSecs: 60, maxInputTokens: 65536, maxRequestBytes: 2_200_000, catalogMaxAgeMs: 30_000, requestTimeoutMs: 5000, pollIntervalMs: 100, mainnetGenesisHash: "fixture-mainnet-genesis", localBookingPoolSize: 2 } };
-  catalog = { providerListFeeBps: 100, providerListProtocolShareBps: 5000, ready: true, slot: 100, programId: cfg.programId, market: cfg.market, providerList: cfg.providerList, models: [{ id: "fixture/coder", address: model.toString(), group: null, name: "Fixture coder", terms: (await Keypair.generate()).publicKey.toString(), capacity: (await Keypair.generate()).publicKey.toString(), contextTokens: 65536, outputTokens: 8192, capabilities: { tools: true, reasoning: true }, modalities: { input: ["text"], output: ["text"] }, offerCount: 64, offers: [{ slot: 0, provider: { wallet: provider.publicKey.toString(), name: "Fixture provider", endpoint: server.url.origin + "/v1/chat/completions" }, inputRate: 500000, cachedRate: 40000, outputRate: 2000000, speed: 100, available: true, active: true, private: false, capacity: 10, activeBookings: 0 }] }] };
+  catalog = { providerListFeeBps: 100, providerListProtocolShareBps: 5000, ready: true, slot: 100, programId: cfg.programId, market: cfg.market, providerList: cfg.providerList, models: [{ id: "fixture/coder", address: model.toString(), group: null, name: "Fixture coder", terms: (await Keypair.generate()).publicKey.toString(), capacity: (await Keypair.generate()).publicKey.toString(), contextTokens: 65536, outputTokens: 8192, capabilities: { tools: true, reasoning: true }, modalities: { input: ["text"], output: ["text"] }, offerCount: 64, offers: [{ checkpoint: createHash("sha256").update("fixture/coder@1017").digest("hex"), checkpointId: "fixture/coder@1017", checkpointName: "1017", checkpointOrder: 0, modalities: { input: ["text"], output: ["text"] }, contextTokens: 1048576, inputBoundTokens: 1048576, outputTokens: 1048576, slot: 0, provider: { wallet: provider.publicKey.toString(), name: "Fixture provider", endpoint: server.url.origin + "/v1/chat/completions" }, inputRate: 500000, cachedRate: 40000, outputRate: 2000000, speed: 100, available: true, active: true, private: false, capacity: 10, activeBookings: 0 }] }] };
   let providerStream: ReturnType<typeof Bun.serve>;
   try { providerStream = Bun.serve({ hostname: "127.0.0.1", port: Number(server.port) + 1, fetch(request, socket) { if (socket.upgrade(request, { data: undefined })) return; return new Response(null, { status: 400 }); }, websocket: { message(socket, message) { const request = JSON.parse(String(message)); socket.send(JSON.stringify({ jsonrpc: "2.0", id: request.id, result: request.method.endsWith("Unsubscribe") ? true : request.id })); } } }); }
   catch (error) { server.stop(true); store.close(); rmSync(directory, { recursive: true, force: true }); if ((error as { code?: string }).code === "EADDRINUSE" && retries < 10) return fixture(customError, retries + 1); throw error; }
@@ -576,5 +576,29 @@ providerTest("confirmed receipt wakes booking reuse and records consecutive requ
     expect(second.bookingPoolWaitMs).toBeGreaterThan(0);
     expect(f.submissions()).toBe(2);
     f.client.refresh = refreshed;
+  } finally { await f.close(); }
+});
+
+providerTest("advanced token requirements and checkpoint are signed and pinned to the matched booking", async () => {
+  const f = await fixture();
+  try {
+    const model = f.catalog.models[0], offer = model.offers[0];
+    f.store.setSettings(f.account.walletId, model.id, { ...f.client.settings(model.id), advancedRouting: true, modelCheckpoint: offer.checkpoint, inputModalities: 1, outputModalities: 1, minContextTokens: 16384, maxInputTokens: 4096, maxOutputTokens: 1024 });
+    const body = JSON.stringify({ model: model.id, messages: [{ role: "user", content: "Hello" }], max_tokens: 128 });
+    const routed = await f.client.request("advanced", model.id, body, "session", "primary", new AbortController().signal);
+    const row = f.store.pending(f.account.wallet)[0];
+    const transaction = Transaction.from(Buffer.from(row.transaction, "base64"));
+    const data = Buffer.from(transaction.instructions.find(ix => ix.programId.toString() === f.cfg.programId && Buffer.from(ix.data).subarray(0, 8).equals(discriminator("global:reserve_booking")))!.data);
+    expect(data.length).toBe(163);
+    expect(data.subarray(115, 147).toString("hex")).toBe(offer.checkpoint);
+    expect(data.readUInt32LE(54)).toBe(4096);
+    expect([...data.subarray(147, 149)]).toEqual([1, 1]);
+    expect(data.readUInt32LE(149)).toBe(16384);
+    expect(data[153]).toBe(1); expect(data[154]).toBe(1);
+    expect(f.bookData.subarray(472, 504).toString("hex")).toBe(offer.checkpoint);
+    expect(row.checkpoint).toBe(offer.checkpoint);
+    const response = await fetch(routed.url, { method: "POST", headers: routed.headers, body });
+    expect(response.ok).toBe(true);
+    await f.client.response(new Request(routed.url, { headers: routed.headers }), response).text();
   } finally { await f.close(); }
 });
