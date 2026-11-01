@@ -5,6 +5,7 @@ import { Fossa } from "./rpc";
 import { installModelPicker } from "./model-picker";
 import { createModelSource } from "./model-source";
 import { installComposer } from "./composer";
+import { installUpdateNotice } from "./updates";
 import { installMessageFooters } from "./message-footer";
 import { settingsDialog } from "./settings-dialog";
 import { openProvider, price } from "./provider-row";
@@ -369,6 +370,7 @@ export default Plugin.define({
     ] }));
     const stopComposer = installComposer(context, details, () => dollars(state().balanceAtomic), openPrice, openSpeed, modelError, { version: external(versions), modalities: external(modalities), limits: external(tokenLimits) });
     const stopFooters = installMessageFooters(context);
-    return () => { stopped = true; clearInterval(timer); stopEvents(); stopUnlock(); stopFooters(); stopComposer(); stopModels(); models.dispose(); dialog.close(); };
+    const stopUpdates = installUpdateNotice(context);
+    return () => { stopped = true; clearInterval(timer); stopUpdates(); stopEvents(); stopUnlock(); stopFooters(); stopComposer(); stopModels(); models.dispose(); dialog.close(); };
   },
 });

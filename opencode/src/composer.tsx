@@ -5,12 +5,15 @@ import { jsx } from "opentui:runtime-module:%40opentui%2Fsolid%2Fjsx-runtime";
 import { providerRow } from "./provider-row";
 import type { ModelDetails } from "./types";
 
-type Mount = { anchor?: BoxRenderable; sample?: TextRenderable; normal: () => boolean; top?: BoxRenderable; bottom?: BoxRenderable; balance?: TextRenderable; inputs?: readonly unknown[] };
+type Mount = { anchor?: BoxRenderable; sample?: TextRenderable; normal: () => boolean; top?: BoxRenderable; bottom?: BoxRenderable; balance?: TextRenderable; home?: Renderable; homeWidth?: number; controlsWidth?: number; inputs?: readonly unknown[] };
 const remove = (node?: Renderable) => { if (node && !node.isDestroyed) { node.parent?.remove(node); node.destroyRecursively(); } };
 
 export function installComposer(context: Context, details: () => ModelDetails | undefined, balance: () => string, openPrice: () => void, openSpeed: () => void, error: () => string | undefined, advanced?: { version: () => void; modalities: () => void; limits: () => void }) {
   const mounts = new Set<Mount>();
-  const clear = (mount: Mount) => { remove(mount.top); remove(mount.bottom); mount.top = undefined; mount.bottom = undefined; mount.balance = undefined; mount.inputs = undefined; };
+  const clear = (mount: Mount) => {
+    if (mount.home && !mount.home.isDestroyed) mount.home.minWidth = undefined;
+    remove(mount.top); remove(mount.bottom); mount.top = undefined; mount.bottom = undefined; mount.balance = undefined; mount.inputs = undefined; mount.home = undefined; mount.homeWidth = undefined; mount.controlsWidth = undefined;
+  };
   const stopSlot = context.ui.slot({ append: "prompt.footer", render: input => {
     const mount: Mount = { normal: () => input.mode === "normal" }; mounts.add(mount);
     onCleanup(() => { clear(mount); mounts.delete(mount); });
@@ -41,7 +44,9 @@ export function installComposer(context: Context, details: () => ModelDetails | 
         mount.bottom = new Box(context.renderer, { id: "fossa-composer-filters", border: ["left"], borderColor: border, customBorderChars: composer?.customBorderChars, marginBottom: 1, flexShrink: 0 });
         const controls = new Box(context.renderer, { backgroundColor: background, paddingLeft: context.renderer.width < 44 ? 0 : 1, paddingRight: 2, flexDirection: "row", gap: 2, flexWrap: "wrap", flexShrink: 0, width: "100%" });
         mount.bottom.add(controls);
+        mount.controlsWidth = context.renderer.width < 44 ? 5 : 6;
         const control = (title: string, value: string, run: () => void) => {
+          mount.controlsWidth! += Bun.stringWidth(`${title}  ${value}`) + 4;
           const box = new Box(context.renderer, { flexDirection: "row", paddingLeft: 1, paddingRight: 1, flexShrink: 0 });
           const label = new Text(context.renderer, { content: `${title}  `, fg: theme.text.base });
           const setting = new Text(context.renderer, { content: value, fg: theme.text.muted });
@@ -65,6 +70,11 @@ export function installComposer(context: Context, details: () => ModelDetails | 
         controls.add(mount.balance); prompt.add(mount.bottom, prompt.getChildren().indexOf(footer));
       }
       if (mount.balance && mount.balance.plainText !== available) mount.balance.content = available;
+      if (home && value?.settings.advancedRouting && advanced && prompt.parent?.parent) {
+        const shell = prompt.parent;
+        const width = Math.max(0, Math.min((mount.controlsWidth ?? 0) + Bun.stringWidth(available), shell.parent!.width, context.renderer.width - (context.renderer.width < 44 ? 2 : 4)));
+        if (mount.home !== shell || mount.homeWidth !== width) { mount.home = shell; mount.homeWidth = width; shell.minWidth = width; }
+      }
     }
   };
   context.renderer.setFrameCallback(draw);
