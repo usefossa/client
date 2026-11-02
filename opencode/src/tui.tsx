@@ -193,6 +193,14 @@ export default Plugin.define({
         await save(model.id, { [field.key]: value });
       }
     };
+    const concurrency = async () => {
+      const model = await currentModel();
+      const raw = await dialog.prompt({ title: "Concurrency", description: "Require the provider’s advertised wallet limit and allocated capacity to support this workload. Each request books one slot; batch capacity is not guaranteed.", value: String(model.settings.desiredConcurrency ?? 1), placeholder: "1" });
+      if (raw === undefined) return;
+      const value = Number(raw.trim());
+      if (!Number.isSafeInteger(value) || value < 1 || value > 0xffffffff) throw Error("Enter a positive whole concurrency count.");
+      await save(model.id, { desiredConcurrency: value });
+    };
     const rakeback = async () => {
       let info: RakebackState = { ...defaultRakeback, availableAtomic: "0", processing: false, needsRecovery: false, message: "" };
       let loaded = false, editing = false, refreshing = false, running = false, closed = false;
@@ -298,7 +306,7 @@ export default Plugin.define({
         { title: "Rakeback", value: "rakeback", category: "Wallet", footer: amount === undefined ? "—" : rakebackDollars(amount), loading: amountLoading },
         { title: "Methodology", value: "methodology", category: "Routing", footer: settings ? settings.mode[0].toUpperCase() + settings.mode.slice(1) : "—", loading: !settings && modelLoading },
         { title: "Advanced options", value: "advanced", category: "Routing", footer: settings?.advancedRouting ? "On" : "Off", loading: !settings && modelLoading },
-        ...(settings?.advancedRouting ? [{ title: "Model version", value: "version", category: "Routing" }, { title: "Modalities", value: "modalities", category: "Routing" }, { title: "Token limits", value: "limits", category: "Routing" }] : []),
+        ...(settings?.advancedRouting ? [{ title: "Model version", value: "version", category: "Routing" }, { title: "Modalities", value: "modalities", category: "Routing" }, { title: "Token limits", value: "limits", category: "Routing" }, { title: "Concurrency", value: "concurrency", category: "Routing", footer: String(settings.desiredConcurrency ?? 1) }] : []),
         { title: "Data retention", value: "retention", category: "Routing", footer: settings ? settings.zdrOnly ? "Zero data retention only" : "Off" : "—", loading: !settings && modelLoading },
         { title: "API endpoint", value: "endpoint", category: "Routing" },
         { title: "Model pane", value: "model-pane", category: "Appearance", footer: stopModels.enabled() ? "On" : "Off" },
@@ -326,6 +334,7 @@ export default Plugin.define({
             else if (value === "version") await versions();
             else if (value === "modalities") await modalities();
             else if (value === "limits") await tokenLimits();
+            else if (value === "concurrency") await concurrency();
             else if (value === "retention") await retention();
             else if (value === "rakeback" || value === "recover") await rakeback();
             else if (value === "model-pane") {
@@ -368,7 +377,7 @@ export default Plugin.define({
       { id: "fossa.unlock", title: "Unlock Fossa wallet", group: "Fossa", palette: true, enabled: () => state().security?.protected === true && !state().security?.unlocked, run: external(async () => { await unlock(); }) },
       { id: "fossa.lock", title: "Lock Fossa wallet", group: "Fossa", palette: true, enabled: () => state().security?.protected === true && state().security?.unlocked === true, run: external(async () => { await rpc.lock({}); await sync(); }) },
     ] }));
-    const stopComposer = installComposer(context, details, () => dollars(state().balanceAtomic), openPrice, openSpeed, modelError, { version: external(versions), modalities: external(modalities), limits: external(tokenLimits) });
+    const stopComposer = installComposer(context, details, () => dollars(state().balanceAtomic), openPrice, openSpeed, modelError, { version: external(versions), modalities: external(modalities), limits: external(tokenLimits), concurrency: external(concurrency) });
     const stopFooters = installMessageFooters(context);
     const stopUpdates = installUpdateNotice(context);
     return () => { stopped = true; clearInterval(timer); stopUpdates(); stopEvents(); stopUnlock(); stopFooters(); stopComposer(); stopModels(); models.dispose(); dialog.close(); };

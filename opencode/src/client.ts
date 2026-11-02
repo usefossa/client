@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { Connection, Keypair, PublicKey, SystemProgram, Transaction, TransactionInstruction, type AccountInfo } from "@solana/web3.js";
+import { cachedProviderWallet, listRoutingAddresses, prepareProviderWallet, providerWalletAddress } from "./provider-wallet";
 import { measureCompute, simulationMiddleware } from "./compute-budget";
 import { createAssociatedTokenAccountIdempotentInstruction, getAssociatedTokenAddress, TOKEN_PROGRAM_ID } from "./token";
 import bs58 from "bs58";
@@ -369,7 +370,7 @@ export class FossaClient {
       if (row.cancelRequested && data[148] === 0 && generation === BigInt(row.generation)) {
         const provider = new PublicKey(data.subarray(40, 72)).toString();
         const model = this.catalog?.models.find(model => model.id === row.model);
-        const offer = model?.offers.find(offer => offer.provider.wallet === provider && offer.slot === data.readUInt32LE(352));
+        const offer = model?.offers.find(offer => offer.provider.wallet === provider && (data[356] === 2 || offer.slot === data.readUInt32LE(352)));
         const endpoint = row.provider === provider && row.endpoint ? row.endpoint : offer?.provider.endpoint;
         if (endpoint) {
           const address = model?.address ?? (await PublicKey.findProgramAddress([Buffer.from("model"), new PublicKey(this.cfg.market).toBytes(), createHash("sha256").update(row.model).digest()], new PublicKey(this.cfg.programId)))[0].toString();
@@ -384,6 +385,7 @@ export class FossaClient {
   private bookingData(info: AccountInfo<Uint8Array>) {
     const data = Buffer.from(info.data);
     if (!info.owner.equals(new PublicKey(this.cfg.programId)) || data.length !== 520 || !data.subarray(0, 8).equals(discriminator("account:FilteredBooking")) || !data.subarray(8, 40).equals(new PublicKey(this.account.wallet).toBytes()) || !data.subarray(72, 104).equals(new PublicKey(this.cfg.market).toBytes()) || !data.subarray(192, 224).equals(new PublicKey(this.account.lane).toBytes())) throw new FossaError("ACCOUNT_INVALID", "Rakeback booking does not belong to this wallet and market.");
+    if (data[356] !== 0 && data[356] !== 2) throw new FossaError("ACCOUNT_INVALID", "Unsupported booking quota marker.");
     return data;
   }
   rakeback(automatic = false) {
@@ -420,7 +422,10 @@ export class FossaClient {
             if (data[148] !== 0 || generation.toString() !== candidate.generation || Number(data.readBigInt64LE(132)) + 15 >= Date.now() / 1000) continue;
             const model = new PublicKey(data.subarray(224, 256)), record = await this.rpc.getAccountInfo(model, "confirmed");
             if (!record || !record.owner.equals(program) || record.data.length !== 176 || !Buffer.from(record.data).subarray(0, 8).equals(discriminator("account:Model")) || !Buffer.from(record.data).subarray(8, 40).equals(market.toBytes())) throw new FossaError("ACCOUNT_INVALID", "Rakeback model is unavailable or invalid.");
-            tx.add(ix(program, "expire_booking", Buffer.concat([Buffer.from([1]), data.subarray(152, 160)]), [meta(market), meta(model), meta(new PublicKey(record.data.subarray(104, 136)), true), meta(lane, true), meta(address, true)]));
+            const marker = data[356];
+            const capacity = marker === 2 ? (await listRoutingAddresses(program, new PublicKey(data.subarray(320, 352)), model)).capacity : new PublicKey(record.data.subarray(104, 136));
+            const wallet = marker === 2 ? await providerWalletAddress(program, market, owner.publicKey) : program;
+            tx.add(ix(program, marker === 2 ? "expire_list_booking" : "expire_booking", Buffer.concat([Buffer.from([1]), data.subarray(152, 160)]), [meta(market), meta(model), meta(capacity, true), meta(lane, true), meta(address, true), ...(marker === 2 ? [meta(wallet, true)] : [])]));
             refunded += data.readBigUInt64LE(104); released++; bookings.push({ address: candidate.address, generation: candidate.generation });
           }
           const laneInfo = await this.rpc.getAccountInfo(lane, "confirmed"), vault = new PublicKey(this.wallet.vault);
@@ -567,14 +572,27 @@ export class FossaClient {
           if (!Number.isSafeInteger(model.offerCount) || model.offerCount < model.offers.length || model.offerCount > 4096) throw new FossaError("CONFIGURATION", "Fossa model book size is invalid.");
           const tx = new Transaction();
           if (deposit) { const amount = Buffer.alloc(8); amount.writeBigUInt64LE(deposit); tx.add(ix(program, "deposit", amount, [meta(market), meta(lane, true), meta(owner.publicKey, false, true), meta(new PublicKey(wallet.source), true), meta((await PublicKey.findProgramAddress([Buffer.from("vault"), lane.toBytes()], program))[0]), meta(new PublicKey(wallet.vault), true), meta(mint), meta(TOKEN_PROGRAM_ID)])); }
-          const payload = Buffer.alloc(155); createHash("sha256").update(modelId).digest().copy(payload);
+          const scoped = this.catalog.listRoutingEnabled === true;
+          if (!scoped && requirements.requiredConcurrency !== 1) throw new FossaError("CONFIGURATION", "Concurrency routing is not enabled for this market.");
+          const list = new PublicKey(this.cfg.providerList), scopedKeys = scoped ? await listRoutingAddresses(program, list, new PublicKey(model.address)) : undefined;
+          if (scopedKeys && (model.terms !== scopedKeys.terms.toString() || model.capacity !== scopedKeys.capacity.toString() || this.catalog.listRouting !== undefined && this.catalog.listRouting !== scopedKeys.routing.toString())) throw new FossaError("CONFIGURATION", "Invalid list routing accounts.");
+          const ledger = scoped ? await prepareProviderWallet(program, market, owner.publicKey, async address => (this.account.rpcUrl ? undefined : cachedProviderWallet(wallet.providerWallet, address, wallet.slot)) ?? await this.rpc.getAccountInfo(address, "processed")) : undefined;
+          let ledgerRent = 0n;
+          if (ledger?.rentSize) {
+            const rent = BigInt(await this.rpc.getMinimumBalanceForRentExemption(ledger.rentSize));
+            const previous = ledger.previousSize ? BigInt(await this.rpc.getMinimumBalanceForRentExemption(ledger.previousSize)) : 0n;
+            ledgerRent = rent > previous ? rent - previous : 0n;
+          }
+          if (ledger?.instructions.length) tx.add(...ledger.instructions);
+          const payload = Buffer.alloc(scoped ? requirements.requiredConcurrency === 1 ? 156 : 160 : 155); createHash("sha256").update(modelId).digest().copy(payload);
           priceFields.forEach((field, index) => payload.writeUInt32LE(settings[field] === undefined ? 0xffffffff : Math.floor(settings[field]! * 1_000_000), 32 + index * 4));
           payload.writeUInt16LE(minSpeed, 44); payload.writeUInt32LE(maxInput, 46); payload.writeUInt32LE(maxOutput, 50); payload[54] = settings.zdrOnly ? 1 : 0;
           payload.writeBigUInt64LE(reserve, 55); payload.writeUInt32LE(estimatedInput, 63); payload.writeUInt32LE(cached, 67); payload.writeUInt32LE(estimatedOutput, 71);
           Buffer.from(requirements.checkpoint, "hex").copy(payload, 107); payload[139] = requirements.inputModalities; payload[140] = requirements.outputModalities;
           payload.writeUInt32LE(requirements.minContext, 141); payload[145] = Number(requirements.limitsConfigured); payload[146] = 1; payload.writeBigUInt64LE(generation, 147);
           if (prior) Buffer.from(new PublicKey(prior.provider!).toBytes()).copy(payload, 75);
-          tx.add(ix(program, "reserve_booking", payload, [meta(market), meta(new PublicKey(model.address)), meta(new PublicKey(model.terms)), meta(new PublicKey(model.capacity), true), meta(lane, true), meta(owner.publicKey, false, true), meta(new PublicKey(free.address), true), meta(new PublicKey(free.rentPayer)), meta(new PublicKey(this.cfg.providerList)), meta(model.group ? new PublicKey(model.group) : program)]));
+          if (scoped && requirements.requiredConcurrency !== 1) { payload[155] = 1; payload.writeUInt32LE(requirements.requiredConcurrency, 156); }
+          tx.add(ix(program, scoped ? "reserve_list_booking" : "reserve_booking", payload, [meta(market), meta(new PublicKey(model.address)), meta(new PublicKey(model.terms)), meta(new PublicKey(model.capacity), true), meta(lane, true), meta(owner.publicKey, false, true), meta(new PublicKey(free.address), true), meta(new PublicKey(free.rentPayer)), meta(list), ...(scopedKeys && ledger ? [meta(scopedKeys.routing), meta(ledger.address, true)] : []), meta(model.group ? new PublicKey(model.group) : program)]));
           this.progress(callId, { stage: "booking", message: `Preparing transaction · reserving up to ${atomic(reserve)} USDC…`, booking: free.address }); signal.throwIfAborted();
           let observed: { info: AccountInfo<Uint8Array>; slot: number; source: "stream" | "rpc" } | undefined, wake!: (slot: number) => void;
           const changed = new Promise<number>(resolve => { wake = resolve; });
@@ -583,7 +601,7 @@ export class FossaClient {
           if (this.socket?.readyState === WebSocket.OPEN) this.socket.send(JSON.stringify({ watch: free.address }));
           let row: Pending, slot: number, info: AccountInfo<Uint8Array> | null;
           try {
-            row = await this.journal(tx, [owner], { id: callId, wallet: this.account.wallet, model: modelId, checkpoint: requirements.checkpoint, bodyHash: hash, providerList: this.cfg.providerList, cache: { messages: parsed.messages.length, prefix: prefix(parsed.messages.length) }, session, kind: "inference", flow: kind, booking: free.address, generation: generation.toString(), reserve: reserve.toString(), deposit: deposit.toString(), startedAt, ...requestTiming, walletLockMs, recoveryWaitMs, admissionWaitMs, bookingPoolWaitMs }, 0, signal);
+            row = await this.journal(tx, [owner], { id: callId, wallet: this.account.wallet, model: modelId, checkpoint: requirements.checkpoint, bodyHash: hash, providerList: this.cfg.providerList, cache: { messages: parsed.messages.length, prefix: prefix(parsed.messages.length) }, session, kind: "inference", flow: kind, booking: free.address, generation: generation.toString(), reserve: reserve.toString(), deposit: deposit.toString(), startedAt, ...requestTiming, walletLockMs, recoveryWaitMs, admissionWaitMs, bookingPoolWaitMs }, ledgerRent, signal);
             slot = await this.processed(row, signal, changed);
             row.processedSlot = slot; this.store.put(row);
             this.progress(callId, { stage: "matched", message: "Transaction confirmed · matching provider…" });
@@ -607,8 +625,8 @@ export class FossaClient {
           }
           if (!info) throw new FossaError("SUBMISSION_UNCERTAIN", "Booking processed but account view is unavailable.");
           const data = this.inspect(info, row, model);
-          if (data[148] !== 0) throw new FossaError("BOOKING_CHANGED", "Booking is no longer available for inference.");
-          const provider = new PublicKey(data.subarray(40, 72)).toBase58(), offer = offers.find(offer => offer.provider.wallet === provider && offer.slot === data.readUInt32LE(352));
+          if (data[148] !== 0 || data[356] !== (scoped ? 2 : 0)) throw new FossaError("BOOKING_CHANGED", "Booking is no longer available for inference.");
+          const provider = new PublicKey(data.subarray(40, 72)).toBase58(), offer = offers.find(offer => offer.provider.wallet === provider && (data[356] === 2 || offer.slot === data.readUInt32LE(352)));
           if (!offer?.provider.endpoint || data.readBigUInt64LE(104) > reserve
             || !data.subarray(472, 504).equals(Buffer.from(requirements.checkpoint, "hex")) || data.readUInt32LE(504) < Math.max(requirements.minContext, maxInput + maxOutput)
             || data.readUInt32LE(508) < maxInput || data.readUInt32LE(512) < maxOutput

@@ -78,3 +78,15 @@ test("canonical model settings reuse a retired alias without replacing newer set
     expect(store.settings("wallet", "retired").minSpeed).toBe(123);
   } finally { store.close(); rmSync(directory, { recursive: true, force: true }); }
 });
+
+
+test("wallet concurrency uses published totals and persists across reload", () => {
+  const settings = validateSettings({ advancedRouting: true, desiredConcurrency: 1000 });
+  const limits = { walletWindowSeconds: 60, walletBookingsPerWindow: 5, walletBookingCapacity: 1000 };
+  const capable = { ...offers[0], capacity: 2000, activeBookings: 1999, provider: { ...offers[0].provider, bookingLimits: limits } };
+  const small = { ...capable, provider: { ...capable.provider, bookingLimits: { ...limits, walletBookingCapacity: 999 } } };
+  expect(eligible({ offers: [capable, small] } as MarketModel, settings)).toEqual([capable]);
+  expect(eligible({ offers: [{ ...capable, capacity: 999 }] } as MarketModel, settings)).toEqual([]);
+  expect(validateSettings({ advancedRouting: false }, settings).desiredConcurrency).toBe(1);
+  for (const desiredConcurrency of [0, -1, 1.1, NaN, 0x100000000]) expect(() => validateSettings({ desiredConcurrency })).toThrow();
+});
