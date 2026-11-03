@@ -75,12 +75,12 @@ test("RPC snapshot decodes account bytes and preserves amounts above Number prec
   } finally { store.close(); rmSync(directory, { recursive: true, force: true }); }
 });
 
-test("booking recovery accepts deployed markers and rejects the unreleased quota prototype", () => {
+test("booking recovery accepts shared-provider and historical markers and rejects unsupported formats", () => {
   const program = new PublicKey(new Uint8Array(32).fill(1)), market = new PublicKey(new Uint8Array(32).fill(2)), owner = new PublicKey(new Uint8Array(32).fill(3)), lane = new PublicKey(new Uint8Array(32).fill(4));
   const client = new FossaClient({} as Store, { wallet: owner.toString(), lane: lane.toString() } as Account, () => {});
   client.cfg = { programId: program.toString(), market: market.toString() } as PublicConfig;
   const data = Buffer.alloc(520); data.set(createHash("sha256").update("account:FilteredBooking").digest().subarray(0, 8)); data.set(owner.toBytes(), 8); data.set(market.toBytes(), 72); data.set(lane.toBytes(), 192);
   const info = { owner: program, data, lamports: 1000n, executable: false, rentEpoch: 0n };
-  for (const marker of [0, 2]) { data[356] = marker; expect(client["bookingData"](info)).toEqual(data); }
-  for (const marker of [1, 3, 255]) { data[356] = marker; expect(() => client["bookingData"](info)).toThrow("Unsupported booking quota marker."); }
+  for (const marker of [0, 2, 3]) { data[356] = marker; expect(client["bookingData"](info)).toEqual(data); }
+  for (const marker of [1, 4, 255]) { data[356] = marker; expect(() => client["bookingData"](info)).toThrow("Unsupported booking quota marker."); }
 });

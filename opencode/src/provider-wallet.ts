@@ -47,3 +47,18 @@ export async function prepareProviderWallet(program: PublicKey, market: PublicKe
   const size = HEADER + STRIDE * (state.capacity + 8);
   return { address, instructions: [providerWalletInstruction("prune", program, market, owner, address), providerWalletInstruction("grow", program, market, owner, address, owner, state.capacity + 8)], rentSize: size, previousSize: HEADER + STRIDE * state.capacity };
 }
+
+export async function providerLimitPageAddress(program: PublicKey, market: PublicKey, page: number) {
+  if (!Number.isInteger(page) || page < 0 || page >= 32) throw Error("Invalid provider limit page.");
+  return (await PublicKey.findProgramAddress([Buffer.from("provider_limit_page"), market.toBytes(), Buffer.from([page])], program))[0];
+}
+export async function providerLimitPages(program: PublicKey, market: PublicKey, offers: { providerLimitId?: number | null }[]) {
+  const pages = new Set<number>();
+  for (const offer of offers) {
+    const id = offer.providerLimitId;
+    if (!Number.isSafeInteger(id) || id! < 0 || id! > 0xffffffff) throw Error("Provider limits are synchronizing.");
+    pages.add(id! & 31);
+  }
+  if (!pages.size) throw Error("Provider limits are synchronizing.");
+  return Promise.all([...pages].sort((a, b) => a - b).map(page => providerLimitPageAddress(program, market, page)));
+}

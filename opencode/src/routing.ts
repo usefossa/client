@@ -1,3 +1,4 @@
+import { providerQuotaAvailable } from "./provider-limits";
 import type { MarketModel, Offer, Settings } from "./types";
 
 export const defaultSettings: Settings = { mode: "balanced", minSpeed: 0, zdrOnly: false, advancedRouting: false, desiredConcurrency: 1, modelCheckpoint: "", inputModalities: 1, outputModalities: 1, minContextTokens: null, maxInputTokens: null, maxOutputTokens: null };
@@ -71,7 +72,7 @@ const matches = (offer: Offer, settings: Settings) => offer.active && offer.spee
   && [offer.inputRate, offer.cachedRate, offer.outputRate].every((rate, index) => settings[priceFields[index]] === undefined || rate <= Math.floor(settings[priceFields[index]]! * 1_000_000));
 export function eligible(model: MarketModel, settings: Settings, input = 0, output = 0, requirements = routingRequirements(model, settings)) {
   const maxInput = Math.max(input, settings.advancedRouting ? settings.maxInputTokens ?? 0 : 0), maxOutput = Math.max(output, settings.advancedRouting ? settings.maxOutputTokens ?? 0 : 0);
-  return model.offers.filter(offer => offer.available && offer.activeBookings < offer.capacity && matches(offer, settings) && offerFits(offer, requirements, maxInput, maxOutput));
+  return model.offers.filter(offer => offer.available && providerQuotaAvailable(offer.provider) && offer.activeBookings < offer.capacity && matches(offer, settings) && offerFits(offer, requirements, maxInput, maxOutput));
 }
 
 export function settling(model: MarketModel, settings: Settings, input = 0, output = 0, requirements = routingRequirements(model, settings)) {
