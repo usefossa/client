@@ -4,7 +4,7 @@ import { errorMessage, type ModelDetails } from "./types";
 
 type Listener = (value?: ModelDetails, error?: string) => void;
 type Entry = { value?: ModelDetails; at: number; version: number; error?: string; pending?: Promise<ModelDetails>; listeners: Set<Listener> };
-const settings = ["mode", "minSpeed", "maxInputPrice", "maxOutputPrice", "maxCachedPrice", "zdrOnly", "advancedRouting", "desiredConcurrency", "modelCheckpoint", "inputModalities", "outputModalities", "minContextTokens", "maxInputTokens", "maxOutputTokens"] as const;
+const settings = ["mode", "minSpeed", "maxInputPrice", "maxOutputPrice", "maxCachedPrice", "zdrOnly", "advancedRouting", "desiredConcurrency", "minimumBookingRate", "modelCheckpoint", "inputModalities", "outputModalities", "minContextTokens", "maxInputTokens", "maxOutputTokens"] as const;
 const offers = ["provider", "wallet", "url", "input", "output", "cached", "speed", "zdr"] as const;
 
 export function sameModel(a: ModelDetails | undefined, b: ModelDetails) {

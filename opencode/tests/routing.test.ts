@@ -87,6 +87,38 @@ test("wallet concurrency uses published totals and persists across reload", () =
   const small = { ...capable, provider: { ...capable.provider, bookingLimits: { ...limits, walletBookingCapacity: 999 } } };
   expect(eligible({ offers: [capable, small] } as MarketModel, settings)).toEqual([capable]);
   expect(eligible({ offers: [{ ...capable, capacity: 999 }] } as MarketModel, settings)).toEqual([]);
-  expect(validateSettings({ advancedRouting: false }, settings).desiredConcurrency).toBe(1);
+  expect(validateSettings({ advancedRouting: false }, settings).desiredConcurrency).toBeNull();
   for (const desiredConcurrency of [0, -1, 1.1, NaN, 0x100000000]) expect(() => validateSettings({ desiredConcurrency })).toThrow();
+});
+
+test("quota normalizes published windows and filters finite, unlimited, and unpublished offers", () => {
+  const limited = (count: number, seconds: number) => ({ ...offers[0], provider: { ...offers[0].provider, bookingLimits: { walletBookingsPerWindow: count, walletWindowSeconds: seconds, walletBookingCapacity: 0 } } });
+  const short = limited(30, 30), long = limited(180, 120), unlimited = limited(0, 60);
+  const canonical = { ...limited(1, 60), provider: { ...limited(1, 60).provider, providerLimits: {
+    global: { concurrency: 300, quota: 300, quotaWindowSeconds: 60 },
+    wallet: { concurrency: 300, quota: 60, quotaWindowSeconds: 30 },
+  }, quotaUsed: 0, quotaWindowEnd: 0 } };
+  const model = { offers: [short, long, unlimited, offers[0], canonical] } as MarketModel;
+  const settings = validateSettings({ advancedRouting: true, minimumBookingRate: 90 });
+  expect(eligible(model, settings)).toEqual([long, unlimited, canonical]);
+  expect(eligible(model, { ...settings, minimumBookingRate: "unlimited" })).toEqual([unlimited]);
+  expect(eligible(model, { ...settings, minimumBookingRate: null })).toEqual(model.offers);
+  expect(validateSettings({ advancedRouting: false }, settings).minimumBookingRate).toBeNull();
+  for (const minimumBookingRate of [0, -1, NaN, Infinity, "120", "invalid"]) expect(() => validateSettings({ minimumBookingRate })).toThrow();
+});
+
+test("saved legacy concurrency becomes Auto and quota settings persist per wallet and model", () => {
+  const directory = mkdtempSync(join(tmpdir(), "fossa-quota-")); let store = new Store(directory);
+  try {
+    store.db.query("INSERT INTO model_settings VALUES(?,?,?)").run("wallet", "old", JSON.stringify({ advancedRouting: true, desiredConcurrency: 1 }));
+    expect(store.settings("wallet", "old").desiredConcurrency).toBeNull();
+    store.db.query("INSERT INTO model_settings VALUES(?,?,?)").run("wallet", "custom", JSON.stringify({ advancedRouting: true, desiredConcurrency: 12 }));
+    expect(store.settings("wallet", "custom").desiredConcurrency).toBe(12);
+    const settings = validateSettings({ advancedRouting: true, desiredConcurrency: null, minimumBookingRate: 0.5 });
+    store.setSettings("wallet", "model", settings);
+    store.close(); store = new Store(directory);
+    expect(store.settings("wallet", "model")).toEqual(settings);
+    expect(store.settings("other", "model").minimumBookingRate).toBeNull();
+    expect(store.settings("wallet", "other").minimumBookingRate).toBeNull();
+  } finally { store.close(); rmSync(directory, { recursive: true, force: true }); }
 });

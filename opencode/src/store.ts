@@ -161,7 +161,11 @@ export class Store {
   settings(id: string, model: string, aliases: string[] = []) {
     const read = (name: string) => this.db.query("SELECT settings FROM model_settings WHERE wallet=? AND model=?").get(id, name) as { settings: string } | null;
     const row = read(model) ?? aliases.map(read).find(Boolean);
-    if (row) return validateSettings(JSON.parse(row.settings));
+    if (row) {
+      const saved = JSON.parse(row.settings);
+      if (!("minimumBookingRate" in saved) && saved.desiredConcurrency === 1) saved.desiredConcurrency = null;
+      return validateSettings(saved);
+    }
     const legacy = this.db.query("SELECT settings FROM wallets WHERE id=?").get(id) as { settings: string | null } | null;
     const old = legacy?.settings ? JSON.parse(legacy.settings) : {};
     return validateSettings(Object.fromEntries(["minSpeed", ...priceFields].filter(key => old[key] !== undefined).map(key => [key, old[key]])), defaultSettings);

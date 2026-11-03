@@ -3,12 +3,13 @@ import type { Context } from "@opencode/plugin/tui/context";
 import { onCleanup } from "opentui:runtime-module:solid-js";
 import { jsx } from "opentui:runtime-module:%40opentui%2Fsolid%2Fjsx-runtime";
 import { providerRow } from "./provider-row";
+import { quotaText } from "./routing";
 import type { ModelDetails } from "./types";
 
 type Mount = { anchor?: BoxRenderable; sample?: TextRenderable; normal: () => boolean; top?: BoxRenderable; bottom?: BoxRenderable; balance?: TextRenderable; home?: Renderable; homeWidth?: number; controlsWidth?: number; inputs?: readonly unknown[] };
 const remove = (node?: Renderable) => { if (node && !node.isDestroyed) { node.parent?.remove(node); node.destroyRecursively(); } };
 
-export function installComposer(context: Context, details: () => ModelDetails | undefined, balance: () => string, openPrice: () => void, openSpeed: () => void, error: () => string | undefined, advanced?: { version: () => void; modalities: () => void; limits: () => void; concurrency?: () => void }) {
+export function installComposer(context: Context, details: () => ModelDetails | undefined, balance: () => string, openPrice: () => void, openSpeed: () => void, error: () => string | undefined, advanced?: { version: () => void; modalities: () => void; limits: () => void; concurrency?: () => void; quota?: () => void }) {
   const mounts = new Set<Mount>();
   const clear = (mount: Mount) => {
     if (mount.home && !mount.home.isDestroyed) mount.home.minWidth = undefined;
@@ -64,7 +65,8 @@ export function installComposer(context: Context, details: () => ModelDetails | 
           control("Version", version?.name ?? "—", advanced.version);
           control("Modalities", mask === 1 ? "Text" : `${count} Active`, advanced.modalities);
           control("Limits", [value.settings.minContextTokens, value.settings.maxInputTokens, value.settings.maxOutputTokens].some(limit => limit != null) ? "Custom" : "Auto", advanced.limits);
-          if (advanced.concurrency) control("Concurrency", String(value.settings.desiredConcurrency ?? 1), advanced.concurrency);
+          if (advanced.concurrency) control("Concurrency", value.settings.desiredConcurrency == null ? "Auto" : String(value.settings.desiredConcurrency), advanced.concurrency);
+          if (advanced.quota) control("Quota", quotaText(value.settings.minimumBookingRate), advanced.quota);
         }
         controls.add(new Box(context.renderer, { flexGrow: 1 }));
         mount.balance = new Text(context.renderer, { id: "fossa-composer-balance", content: available, fg: theme.text.base, flexShrink: 0, wrapMode: "none" });

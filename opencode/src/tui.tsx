@@ -10,7 +10,7 @@ import { installMessageFooters } from "./message-footer";
 import { settingsDialog } from "./settings-dialog";
 import { openProvider, price } from "./provider-row";
 import { defaultRakeback, rakebackAmounts, rakebackDollars, rakebackIntervals } from "./rakeback";
-import { modalityOptions } from "./routing";
+import { modalityOptions, quotaText } from "./routing";
 import { errorMessage, type FilterField, type ModelDetails, type RakebackSettings, type RakebackState, type Settings, type Status, type UnlockRequest } from "./types";
 
 const dollars = (value?: string) => value === undefined ? "$—" : `$${(Number(value) / 1_000_000).toFixed(2)}`;
@@ -195,11 +195,19 @@ export default Plugin.define({
     };
     const concurrency = async () => {
       const model = await currentModel();
-      const raw = await dialog.prompt({ title: "Concurrency", description: "Require the provider’s advertised wallet limit and allocated capacity to support this workload. Each request books one slot; batch capacity is not guaranteed.", value: String(model.settings.desiredConcurrency ?? 1), placeholder: "1" });
+      const raw = await dialog.prompt({ title: "Concurrency", description: "Requests at once. Leave blank for Auto.", value: model.settings.desiredConcurrency == null ? "" : String(model.settings.desiredConcurrency), placeholder: "Auto" });
       if (raw === undefined) return;
-      const value = Number(raw.trim());
-      if (!Number.isSafeInteger(value) || value < 1 || value > 0xffffffff) throw Error("Enter a positive whole concurrency count.");
+      const value = raw.trim() ? Number(raw) : null;
+      if (value !== null && (!Number.isSafeInteger(value) || value < 1 || value > 0xffffffff)) throw Error("Enter a positive whole concurrency count, or leave blank for Auto.");
       await save(model.id, { desiredConcurrency: value });
+    };
+    const quota = async () => {
+      const model = await currentModel();
+      const raw = await dialog.prompt({ title: "Minimum quota", description: 'Minimum wallet quota (REQ/M). Blank = Auto (no minimum). Enter "unlimited" to match only explicitly uncapped wallet quotas. Provider-wide limits still apply.', value: model.settings.minimumBookingRate == null ? "" : String(model.settings.minimumBookingRate), placeholder: "Auto" });
+      if (raw === undefined) return;
+      const text = raw.trim(), value = !text ? null : /^unlimited$/i.test(text) ? "unlimited" : Number(text);
+      if (value !== null && value !== "unlimited" && (!Number.isFinite(value) || value <= 0)) throw Error('Enter a positive minimum quota (REQ/M), "unlimited" for uncapped wallet quotas, or leave blank for Auto.');
+      await save(model.id, { minimumBookingRate: value });
     };
     const rakeback = async () => {
       let info: RakebackState = { ...defaultRakeback, availableAtomic: "0", processing: false, needsRecovery: false, message: "" };
@@ -306,7 +314,7 @@ export default Plugin.define({
         { title: "Rakeback", value: "rakeback", category: "Wallet", footer: amount === undefined ? "—" : rakebackDollars(amount), loading: amountLoading },
         { title: "Methodology", value: "methodology", category: "Routing", footer: settings ? settings.mode[0].toUpperCase() + settings.mode.slice(1) : "—", loading: !settings && modelLoading },
         { title: "Advanced options", value: "advanced", category: "Routing", footer: settings?.advancedRouting ? "On" : "Off", loading: !settings && modelLoading },
-        ...(settings?.advancedRouting ? [{ title: "Model version", value: "version", category: "Routing" }, { title: "Modalities", value: "modalities", category: "Routing" }, { title: "Token limits", value: "limits", category: "Routing" }, { title: "Concurrency", value: "concurrency", category: "Routing", footer: String(settings.desiredConcurrency ?? 1) }] : []),
+        ...(settings?.advancedRouting ? [{ title: "Model version", value: "version", category: "Routing" }, { title: "Modalities", value: "modalities", category: "Routing" }, { title: "Token limits", value: "limits", category: "Routing" }, { title: "Concurrency", value: "concurrency", category: "Routing", footer: settings.desiredConcurrency == null ? "Auto" : String(settings.desiredConcurrency) }, { title: "Quota", value: "quota", category: "Routing", footer: quotaText(settings.minimumBookingRate) }] : []),
         { title: "Data retention", value: "retention", category: "Routing", footer: settings ? settings.zdrOnly ? "Zero data retention only" : "Off" : "—", loading: !settings && modelLoading },
         { title: "API endpoint", value: "endpoint", category: "Routing" },
         { title: "Model pane", value: "model-pane", category: "Appearance", footer: stopModels.enabled() ? "On" : "Off" },
@@ -335,6 +343,7 @@ export default Plugin.define({
             else if (value === "modalities") await modalities();
             else if (value === "limits") await tokenLimits();
             else if (value === "concurrency") await concurrency();
+            else if (value === "quota") await quota();
             else if (value === "retention") await retention();
             else if (value === "rakeback" || value === "recover") await rakeback();
             else if (value === "model-pane") {
@@ -377,7 +386,7 @@ export default Plugin.define({
       { id: "fossa.unlock", title: "Unlock Fossa wallet", group: "Fossa", palette: true, enabled: () => state().security?.protected === true && !state().security?.unlocked, run: external(async () => { await unlock(); }) },
       { id: "fossa.lock", title: "Lock Fossa wallet", group: "Fossa", palette: true, enabled: () => state().security?.protected === true && state().security?.unlocked === true, run: external(async () => { await rpc.lock({}); await sync(); }) },
     ] }));
-    const stopComposer = installComposer(context, details, () => dollars(state().balanceAtomic), openPrice, openSpeed, modelError, { version: external(versions), modalities: external(modalities), limits: external(tokenLimits), concurrency: external(concurrency) });
+    const stopComposer = installComposer(context, details, () => dollars(state().balanceAtomic), openPrice, openSpeed, modelError, { version: external(versions), modalities: external(modalities), limits: external(tokenLimits), concurrency: external(concurrency), quota: external(quota) });
     const stopFooters = installMessageFooters(context);
     const stopUpdates = installUpdateNotice(context);
     return () => { stopped = true; clearInterval(timer); stopUpdates(); stopEvents(); stopUnlock(); stopFooters(); stopComposer(); stopModels(); models.dispose(); dialog.close(); };
