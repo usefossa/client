@@ -203,7 +203,7 @@ export default Plugin.define({
     };
     const quota = async () => {
       const model = await currentModel();
-      const raw = await dialog.prompt({ title: "Minimum quota", description: 'Minimum wallet quota (REQ/M). Blank = Auto (no minimum). Enter "unlimited" to match only explicitly uncapped wallet quotas. Provider-wide limits still apply.', value: model.settings.minimumBookingRate == null ? "" : String(model.settings.minimumBookingRate), placeholder: "Auto" });
+      const raw = await dialog.prompt({ title: "Minimum quota", description: "Minimum quota (REQ/M). Auto = no minimum.", value: model.settings.minimumBookingRate == null ? "" : String(model.settings.minimumBookingRate), placeholder: "Auto" });
       if (raw === undefined) return;
       const text = raw.trim(), value = !text ? null : /^unlimited$/i.test(text) ? "unlimited" : Number(text);
       if (value !== null && value !== "unlimited" && (!Number.isFinite(value) || value <= 0)) throw Error('Enter a positive minimum quota (REQ/M), "unlimited" for uncapped wallet quotas, or leave blank for Auto.');
