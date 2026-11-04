@@ -2,7 +2,7 @@
 
 ## scope
 
-client integrations live in their own directories. `opencode/` contains the OpenCode integration; read its [instructions](opencode/AGENTS.md) before changing it. see [client documentation](https://fossa.ag/docs/users/client-connections).
+client integrations live in their own directories. `opencode/` contains the OpenCode integration; read its [instructions](opencode/AGENTS.md) before changing it. see [client documentation](https://fossa.ag/docs/users/qs).
 
 ## workflow
 

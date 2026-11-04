@@ -1,1 +1,1 @@
-[Client Documentation](https://fossa.ag/docs/users/quick-start)
+[Client Documentation](https://fossa.ag/docs/users/qs)
