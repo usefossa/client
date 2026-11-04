@@ -1,8 +1,8 @@
 import { bookingLookupTables, compileBookingTransaction } from "./booking-transaction";
 import { createHash, randomUUID } from "node:crypto";
-import { Connection, Keypair, PublicKey, SystemProgram, Transaction, TransactionInstruction, type AccountInfo } from "@solana/web3.js";
+import { ComputeBudgetProgram, Connection, Keypair, PublicKey, SystemProgram, Transaction, TransactionInstruction, type AccountInfo } from "@solana/web3.js";
 import { cachedProviderWallet, listRoutingAddresses, prepareProviderWallet, providerWalletAddress, providerLimitPages, providerLimitPageAddress } from "./provider-wallet";
-import { measureCompute, simulationMiddleware } from "./compute-budget";
+import { sizeCompute, transactionPriority, simulationMiddleware, type BookingComputeState } from "./compute-budget";
 import { createAssociatedTokenAccountIdempotentInstruction, getAssociatedTokenAddress, TOKEN_PROGRAM_ID } from "../account/token";
 import bs58 from "bs58";
 import { providerError, bookingPending } from "./provider-response";
@@ -11,7 +11,7 @@ import { signMessage } from "../account/signing";
 import { Store, type Pending } from "../account/store";
 import { inputBound, validateBody } from "../protocol";
 import { recoverable, rakebackDollars } from "./rakeback";
-import { FossaError, type Account, type Catalog, type Chain, type MarketModel, type Offer, type PublicConfig, type RakebackFunds, type RakebackState, type Settings, type Status, type WalletState } from "../types";
+import { FossaError, type Account, type Catalog, type Chain, type MarketModel, type Offer, type PublicConfig, type RakebackFunds, type RakebackState, type Settings, type Status, type TransactionFees, type WalletState } from "../types";
 
 export { inputBound } from "../protocol";
 import { eligible, fee, priceFields, rankOffers, settling, unavailable, routingRequirements, offerFits } from "./routing";
@@ -31,6 +31,8 @@ export class FossaClient {
   status: Status = { stage: "connecting", message: "Connecting to Fossa…", paidAtomic: "0", connected: false };
   private rpc!: Connection; private socket?: WebSocket; private retry?: ReturnType<typeof setTimeout>; private timer?: ReturnType<typeof setInterval>;
   private chainUntil = 0; private catalogAt = 0; private walletAt = 0; private stopped = false; private refreshing?: Promise<void>;
+  private transactionFees?: TransactionFees;
+  private feeVersion = 0;
   private catalogWaiters = new Set<() => void>();
   private walletWaiters = new Set<() => void>();
   private catalogVersion = 0;
@@ -65,7 +67,8 @@ export class FossaClient {
         const update = JSON.parse(String(event.data));
         if (update.type === "catalog") this.updateCatalog(update.data);
         if (update.type === "chain") { this.chain = update.data ?? undefined; this.chainUntil = Date.now() + (this.chain?.maxAgeMs ?? 0) - 1000; }
-        if (update.type === "wallet" && update.data.wallet === this.account.wallet && update.data.lane === this.account.lane && update.data.slot >= (this.wallet?.slot ?? 0)) { this.wallet = update.data; this.walletAt = Date.now(); this.wakeWallet(); }
+        if (update.type === "fees") { this.acceptFees(update.data); return; }
+        if (update.type === "wallet" && update.data.wallet === this.account.wallet && update.data.lane === this.account.lane && update.data.slot >= (this.wallet?.slot ?? 0)) { this.wallet = update.data; this.acceptFees(update.data.transactionFees); this.walletAt = Date.now(); this.wakeWallet(); }
         if (update.type === "receipt" && update.commitment === "confirmed") this.receipt(update.data);
         if (update.type === "resync") void this.refresh().catch(() => {});
         if (update.type === "booking") {
@@ -134,6 +137,7 @@ export class FossaClient {
     const pool = new Set([...(this.wallet?.bookings ?? []).map(item => item.address), ...Object.keys(this.store.unlocked(this.account.walletId) ? this.store.secrets(this.account.walletId).bookings : {})]);
     if (!this.account.rpcUrl && !forceRpc) {
       const snapshot = await api<WalletState>(this.account.apiUrl, "/opencode/wallet", { token: this.account.access });
+      this.acceptFees(snapshot.transactionFees);
       if (snapshot.slot >= minSlot && [...pool].every(address => snapshot.bookings.some(item => item.address === address))) return snapshot;
     }
     const program = new PublicKey(this.cfg.programId), owner = new PublicKey(this.account.wallet), lane = new PublicKey(this.account.lane), mint = new PublicKey(this.cfg.usdcMint);
@@ -153,6 +157,17 @@ export class FossaClient {
   private quote() {
     if (this.chain && Date.now() < this.chainUntil) return this.chain;
     throw new FossaError("CHAIN_SYNCING", "Fossa chain data is synchronizing. Try again shortly.");
+  }
+  private acceptFees(fees?: TransactionFees) {
+    if (fees) { this.transactionFees = fees; this.feeVersion++; }
+  }
+  private async priority(units: number, signal?: AbortSignal) {
+    try { return transactionPriority(units, this.transactionFees ?? this.wallet?.transactionFees!); } catch { /* refresh missing or invalid fee data before signing */ }
+    const version = this.feeVersion;
+    const snapshot = await api<WalletState>(this.account.apiUrl, "/opencode/wallet", { token: this.account.access, signal });
+    if (snapshot.wallet !== this.account.wallet || snapshot.lane !== this.account.lane) throw new FossaError("ACCOUNT_INVALID", "Transaction fee snapshot belongs to another wallet.");
+    if (version === this.feeVersion) this.acceptFees(snapshot.transactionFees);
+    return transactionPriority(units, this.transactionFees!);
   }
   private availableWallet(): WalletState {
     if (!this.wallet) throw new FossaError("WALLET_SYNCING", "Wallet is synchronizing. Try again shortly.");
@@ -279,14 +294,20 @@ export class FossaClient {
       }
     }
   }
-  private async journal(tx: Transaction, signers: Keypair[], fields: Omit<Pending, "signature" | "transaction" | "expiry" | "stage" | "created">, rent: number | bigint = 0, signal?: AbortSignal) {
+  private async journal(tx: Transaction, signers: Keypair[], fields: Omit<Pending, "signature" | "transaction" | "expiry" | "stage" | "created">, rent: number | bigint = 0, signal?: AbortSignal, compute?: BookingComputeState) {
     this.assertJournalScope();
     const quote = this.quote(); tx.feePayer = signers[0].publicKey; tx.recentBlockhash = quote.blockhash as NonNullable<Transaction["recentBlockhash"]>;
     signal?.throwIfAborted();
-    const cost = BigInt(quote.signatureFee) * BigInt(tx.compileMessage().header.numRequiredSignatures), required = cost + BigInt(rent), balance = BigInt(this.availableWallet().lamports);
-    if (balance < required) throw new FossaError("SOL_REQUIRED", `Add ${atomic(required - balance, 9)} SOL for ${rent ? "account rent and " : ""}transaction fees.`, { requiredLamports: required.toString() });
     const tables = fields.kind === "inference" ? await bookingLookupTables(this.rpc, this.cfg.providerLimitLookupTables) : [];
-    await measureCompute(tx, this.rpc, this.wallet?.slot ?? 0, tables);
+    const units = await sizeCompute(tx, this.rpc, this.wallet?.slot ?? 0, tables, compute);
+    signal?.throwIfAborted();
+    if (this.stopped) throw new FossaError("FOSSA_STOPPED", "Fossa connection closed.");
+    const priority = await this.priority(units, signal);
+    tx.instructions = tx.instructions.filter(ix => !ix.programId.equals(ComputeBudgetProgram.programId) || ix.data[0] !== 3);
+    tx.add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: priority.microLamports }));
+    const cost = BigInt(quote.signatureFee) * BigInt(tx.compileMessage().header.numRequiredSignatures) + priority.lamports;
+    const required = cost + BigInt(rent), balance = BigInt(this.availableWallet().lamports);
+    if (balance < required) throw new FossaError("SOL_REQUIRED", `Add ${atomic(required - balance, 9)} SOL for ${rent ? "account rent and " : ""}transaction fees.`, { requiredLamports: required.toString() });
     signal?.throwIfAborted();
     if (this.stopped) throw new FossaError("FOSSA_STOPPED", "Fossa connection closed.");
     const transaction = compileBookingTransaction(tx, tables);
@@ -588,6 +609,7 @@ export class FossaClient {
             ledgerRent = rent > previous ? rent - previous : 0n;
           }
           if (ledger?.instructions.length) tx.add(...ledger.instructions);
+          const compute = limitsPages.length && ledger ? { offers: model.offerCount, pages: limitsPages.length, walletEntries: ledger.entries, walletBump: ledger.bump, initializeWallet: Boolean(ledger.rentSize && !ledger.previousSize), growWallet: Boolean(ledger.previousSize), deposit: deposit > 0n } : undefined;
           const payload = Buffer.alloc(scoped ? requirements.requiredConcurrency === 1 ? 156 : 160 : 155); createHash("sha256").update(modelId).digest().copy(payload);
           priceFields.forEach((field, index) => payload.writeUInt32LE(settings[field] === undefined ? 0xffffffff : Math.floor(settings[field]! * 1_000_000), 32 + index * 4));
           payload.writeUInt16LE(minSpeed, 44); payload.writeUInt32LE(maxInput, 46); payload.writeUInt32LE(maxOutput, 50); payload[54] = settings.zdrOnly ? 1 : 0;
@@ -605,7 +627,7 @@ export class FossaClient {
           if (this.socket?.readyState === WebSocket.OPEN) this.socket.send(JSON.stringify({ watch: free.address }));
           let row: Pending, slot: number, info: AccountInfo<Uint8Array> | null;
           try {
-            row = await this.journal(tx, [owner], { id: callId, wallet: this.account.wallet, model: modelId, checkpoint: requirements.checkpoint, bodyHash: hash, providerList: this.cfg.providerList, cache: { messages: parsed.messages.length, prefix: prefix(parsed.messages.length) }, session, kind: "inference", flow: kind, booking: free.address, generation: generation.toString(), reserve: reserve.toString(), deposit: deposit.toString(), startedAt, ...requestTiming, walletLockMs, recoveryWaitMs, admissionWaitMs, bookingPoolWaitMs }, ledgerRent, signal);
+            row = await this.journal(tx, [owner], { id: callId, wallet: this.account.wallet, model: modelId, checkpoint: requirements.checkpoint, bodyHash: hash, providerList: this.cfg.providerList, cache: { messages: parsed.messages.length, prefix: prefix(parsed.messages.length) }, session, kind: "inference", flow: kind, booking: free.address, generation: generation.toString(), reserve: reserve.toString(), deposit: deposit.toString(), startedAt, ...requestTiming, walletLockMs, recoveryWaitMs, admissionWaitMs, bookingPoolWaitMs }, ledgerRent, signal, compute);
             slot = await this.processed(row, signal, changed);
             row.processedSlot = slot; this.store.put(row);
             this.progress(callId, { stage: "matched", message: "Transaction confirmed · matching provider…" });

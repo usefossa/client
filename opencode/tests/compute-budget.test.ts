@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { ComputeBudgetProgram, Keypair, Transaction, TransactionInstruction, Connection, type VersionedTransaction } from "@solana/web3.js";
-import { measureCompute, simulationMiddleware } from "../src/inference/compute-budget";
+import { bookingCompute, measureCompute, simulationMiddleware, sizeCompute, transactionPriority } from "../src/inference/compute-budget";
+import type { TransactionFees } from "../src/types";
 
 async function transaction(count = 1) {
   const payer = (await Keypair.generate()).publicKey, program = (await Keypair.generate()).publicKey;
@@ -68,4 +69,35 @@ test("rejects missing, invalid, failed or stale simulation evidence before signi
     expect(tx.signatures.every(signature => signature.signature === null)).toBe(true);
   }
   await expect(measureCompute(await transaction(), rpc({ unitsConsumed: 1000n }, 9n), 10)).rejects.toThrow("stale");
+});
+
+test("native paged booking sizing covers measured routes without RPC simulation", async () => {
+  const state = { offers: 2, pages: 1, walletEntries: 0, walletBump: 255, initializeWallet: false, growWallet: false, deposit: false };
+  const deadRpc = { simulateTransaction: async () => { throw Error("hot path must not simulate"); } } as unknown as Pick<Connection, "simulateTransaction">;
+  for (const [offers, pages, walletEntries, measured] of [[2, 1, 0, 3338], [32, 32, 32, 15494], [100, 1, 100, 9202], [4096, 32, 4096, 853694], [4096, 1, 4096, 674816], [2, 1, 100000, 4565]]) {
+    const input = { ...state, offers, pages, walletEntries }, consumed = bookingCompute(input), tx = await transaction();
+    expect(consumed).toBeGreaterThanOrEqual(measured);
+    const units = await sizeCompute(tx, deadRpc, 100, [], input);
+    expect(units).toBe(consumed + Math.ceil(consumed / 10) + 1000);
+    expect(Buffer.from(tx.instructions[0].data).readUInt32LE(1)).toBe(units);
+    expect(tx.signatures.every(signature => signature.signature === null)).toBe(true);
+  }
+  expect(bookingCompute({ ...state, initializeWallet: true, walletBump: 240 })).toBeGreaterThan(bookingCompute({ ...state, initializeWallet: true }));
+  expect(bookingCompute({ ...state, deposit: true })).toBeGreaterThan(bookingCompute(state));
+  expect(() => bookingCompute({ ...state, offers: 4097 })).toThrow();
+  expect(() => bookingCompute({ ...state, growWallet: true, walletEntries: 100000 })).toThrow("separate wallet maintenance");
+});
+
+test("streamed native priority floors and caps use exact bigint rounding independently of Jito tips", () => {
+  const now = Math.floor(Date.now() / 1000), fees: TransactionFees = { baselineMicroLamports: 1000, baselineFloorLamports: 1000, baselineCapLamports: 100000 };
+  for (const units of [1, 12001, 100000, 1400000]) {
+    const priority = transactionPriority(units, fees);
+    expect(priority.microLamports).toBeGreaterThan(0n);
+    expect(priority.lamports).toBe((priority.microLamports * BigInt(units) + 999999n) / 1000000n);
+    expect(priority.lamports).toBeGreaterThanOrEqual(1000n);
+    expect(priority.lamports).toBeLessThanOrEqual(100001n);
+  }
+  expect(transactionPriority(100000, { ...fees, baselineMicroLamports: Number.MAX_SAFE_INTEGER }).lamports).toBe(100000n);
+  for (const tips of [{ available: false }, { updatedAt: now - 91 }, { expiresAt: now - 1 }]) expect(transactionPriority(1000, { ...fees, ...tips }).microLamports).toBeGreaterThan(0n);
+  for (const invalid of [{ ...fees, baselineFloorLamports: 0 }, { ...fees, baselineCapLamports: 100001 }, { ...fees, baselineMicroLamports: NaN }]) expect(() => transactionPriority(1000, invalid)).toThrow("synchronizing");
 });

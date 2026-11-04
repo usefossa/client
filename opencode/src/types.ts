@@ -36,7 +36,8 @@ export interface MarketModel {
 }
 export interface Catalog { providerLimitsEnabled?: boolean; providerLimitLookupTables?: string[]; listRoutingEnabled?: boolean; listRouting?: string; aliases?: Record<string, string>; providerListFeeBps?: number; providerListProtocolShareBps?: number; ready: boolean; slot: number; programId: string; market: string; providerList: string; models: MarketModel[] }
 export interface Chain { blockhash: string; lastValidBlockHeight: number; bookingRent: string; signatureFee: string; maxAgeMs: number }
-export interface WalletState { providerWallet?: import("./inference/provider-wallet").ProviderWalletSnapshot | null; wallet: string; lane: string; vault: string; source: string; ready: boolean; lamports: string; usdcAtomic: string; freeAtomic: string; generation: string; bookings: { address: string; status: number; generation: string; rentPayer: string }[]; slot: number }
+export interface TransactionFees { baselineMicroLamports: number; baselineFloorLamports: number; baselineCapLamports: number }
+export interface WalletState { transactionFees?: TransactionFees; providerWallet?: import("./inference/provider-wallet").ProviderWalletSnapshot | null; wallet: string; lane: string; vault: string; source: string; ready: boolean; lamports: string; usdcAtomic: string; freeAtomic: string; generation: string; bookings: { address: string; status: number; generation: string; rentPayer: string }[]; slot: number }
 export interface Account { walletId: string; wallet: string; lane: string; apiUrl: string; name: string; rpcUrl?: string; rpcWsUrl?: string; access: string; refresh: string; expires: number }
 export interface WalletSecrets { owner: number[]; lane?: number[]; bookings: Record<string, number[]> }
 export type BookingRate = number | "unlimited" | null;

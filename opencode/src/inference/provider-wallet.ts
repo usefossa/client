@@ -39,13 +39,13 @@ export function providerWalletInstruction(action: keyof typeof names, program: P
   return new TransactionInstruction({ programId: program, data: Buffer.concat([Buffer.from(names[action], "hex"), payload]), keys });
 }
 export async function prepareProviderWallet(program: PublicKey, market: PublicKey, owner: PublicKey, read: (address: PublicKey) => Promise<Account | null>) {
-  const address = await providerWalletAddress(program, market, owner), info = await read(address);
-  if (!info) return { address, instructions: [providerWalletInstruction("initialize", program, market, owner, address, owner, 8)], rentSize: HEADER + STRIDE * 8 };
+  const [address, bump] = await PublicKey.findProgramAddress([Buffer.from("provider_wallet"), market.toBytes(), owner.toBytes()], program), info = await read(address);
+  if (!info) return { address, bump, entries: 0, instructions: [providerWalletInstruction("initialize", program, market, owner, address, owner, 8)], rentSize: HEADER + STRIDE * 8 };
   const state = decodeProviderWallet(info, program, market, owner);
-  if (state.count < state.capacity) return { address, instructions: [], rentSize: 0 };
+  if (state.count < state.capacity) return { address, bump, entries: state.count, instructions: [], rentSize: 0 };
   if (state.capacity > 0xffffffff - 8) throw Error("Provider wallet storage is full.");
   const size = HEADER + STRIDE * (state.capacity + 8);
-  return { address, instructions: [providerWalletInstruction("prune", program, market, owner, address), providerWalletInstruction("grow", program, market, owner, address, owner, state.capacity + 8)], rentSize: size, previousSize: HEADER + STRIDE * state.capacity };
+  return { address, bump, entries: state.count, instructions: [providerWalletInstruction("prune", program, market, owner, address), providerWalletInstruction("grow", program, market, owner, address, owner, state.capacity + 8)], rentSize: size, previousSize: HEADER + STRIDE * state.capacity };
 }
 
 export async function providerLimitPageAddress(program: PublicKey, market: PublicKey, page: number) {

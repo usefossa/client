@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -17,6 +17,7 @@ for (const setup of [false, true]) test(`journal preserves v1 signed transaction
     const client = new FossaClient(store, account, () => {});
     client.cfg = { opencode: {} } as PublicConfig;
     client.wallet = { lamports: "1000000", usdcAtomic: "0", freeAtomic: "0", generation: "0", bookings: [] } as unknown as WalletState;
+    client["transactionFees"] = { baselineMicroLamports: 1000, baselineFloorLamports: 1000, baselineCapLamports: 5000 };
     client.chain = { blockhash: new PublicKey(new Uint8Array(32).fill(4)).toString(), lastValidBlockHeight: 100, signatureFee: "5000" } as typeof client.chain;
     client["chainUntil"] = Date.now() + 60_000;
     client["rpc"] = { simulateTransaction: async () => ({ context: { slot: 0n }, value: { err: null, unitsConsumed: 35_454n } }), sendRawTransaction: async () => "fixture" } as unknown as typeof client["rpc"];
@@ -25,12 +26,77 @@ for (const setup of [false, true]) test(`journal preserves v1 signed transaction
     tx.add(new TransactionInstruction({ programId: program, keys: [{ pubkey: lane.publicKey, isSigner: setup, isWritable: true }, { pubkey: owner.publicKey, isSigner: true, isWritable: false }], data: Buffer.alloc(116, 6) }));
     const row = await client["journal"](tx, setup ? [owner, lane] : [owner], { id: "fixture", wallet: account.wallet, model: "", bodyHash: "", session: "", kind: "setup", booking: "", generation: "0", reserve: "0" });
     const bytes = Buffer.from(row.transaction, "base64");
-    expect(createHash("sha256").update(bytes).digest("hex")).toBe(setup ? "105747493da9210c7e8e864f3f3c53011fb3357120be4d55786c40b3423a5d07" : "9a9ce41089c237c7ed1283ee326cbcecd68f379bc61a097bdc42277e6e65a692");
+    expect(createHash("sha256").update(bytes).digest("hex")).toBe(setup ? "72799a71c260a495bcabd802bb8c73e9fcb09694a75aebcfdc91ee81667490bb" : "bc0b66c99badd85ec1bc9c0a44bce03cd47aa8cd0bad8add5198a33f7e44319d");
     expect(await Transaction.from(bytes).verifySignatures()).toBe(true);
-    expect(row.feeLamports).toBe(setup ? "10000" : "5000");
+    expect(row.feeLamports).toBe(setup ? "11000" : "6000");
+    const price = Transaction.from(bytes).instructions.filter(ix => ix.programId.equals(ComputeBudgetProgram.programId) && ix.data[0] === 3);
+    expect(price).toHaveLength(1);
+    expect(Buffer.from(price[0].data).readBigUInt64LE(1)).toBe(25_000n);
     expect(store.request(row.id, account.wallet)?.transaction).toBe(row.transaction);
     await client.drain();
   } finally { store.close(); rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("native paged journal reserves exact priority fee before signing without simulation", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "fossa-priority-")), store = new Store(directory);
+  try {
+    const owner = await Keypair.generate(), program = (await Keypair.generate()).publicKey;
+    const account = { walletId: "fixture", wallet: owner.publicKey.toString(), lane: program.toString() } as Account;
+    const client = new FossaClient(store, account, () => {});
+    client.cfg = { opencode: {} } as PublicConfig;
+    client.wallet = { lamports: "5000", usdcAtomic: "0", freeAtomic: "0", generation: "0", bookings: [] } as unknown as WalletState;
+    client.chain = { blockhash: owner.publicKey.toString(), lastValidBlockHeight: 100, signatureFee: "5000" } as typeof client.chain;
+    client["chainUntil"] = Date.now() + 60_000;
+    client["transactionFees"] = { baselineMicroLamports: 1000, baselineFloorLamports: 1000, baselineCapLamports: 5000 };
+    let simulations = 0;
+    client["rpc"] = { simulateTransaction: async () => { simulations++; throw Error("native reserve must not simulate"); }, sendRawTransaction: async () => "fixture" } as unknown as typeof client["rpc"];
+    const payload = Buffer.alloc(164); payload.set(createHash("sha256").update("global:reserve_list_booking").digest().subarray(0, 8));
+    const tx = new Transaction().add(new TransactionInstruction({ programId: program, keys: [{ pubkey: owner.publicKey, isSigner: true, isWritable: true }], data: payload }));
+    const fields = { id: "native", wallet: account.wallet, model: "fixture/model", bodyHash: "", session: "", kind: "inference", booking: program.toString(), generation: "1", reserve: "0" };
+    const compute = { offers: 32, pages: 4, walletEntries: 8, walletBump: 255, initializeWallet: false, growWallet: false, deposit: false };
+    let failure: unknown;
+    try { await client["journal"](tx, [owner], fields, 0, undefined, compute); } catch (error) { failure = error; }
+    expect(failure).toMatchObject({ code: "SOL_REQUIRED" });
+    expect(tx.signatures.every(signature => signature.signature === null)).toBe(true);
+    expect(store.pending()).toHaveLength(0);
+    client.wallet.lamports = "1000000";
+    const row = await client["journal"](tx, [owner], fields, 0, undefined, compute);
+    const signed = Transaction.from(Buffer.from(row.transaction, "base64"));
+    const price = signed.instructions.find(ix => ix.programId.equals(ComputeBudgetProgram.programId) && ix.data[0] === 3)!;
+    const limit = signed.instructions.find(ix => ix.programId.equals(ComputeBudgetProgram.programId) && ix.data[0] === 2)!;
+    const priority = (Buffer.from(price.data).readBigUInt64LE(1) * BigInt(Buffer.from(limit.data).readUInt32LE(1)) + 999999n) / 1000000n;
+    expect(row.feeLamports).toBe(String(5000n + priority));
+    expect(client["availableWallet"]().lamports).toBe(String(1000000n - BigInt(row.feeLamports!)));
+    expect(await signed.verifySignatures()).toBe(true);
+    expect(simulations).toBe(0);
+    await client.drain();
+  } finally { store.close(); rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("missing streamed fees refresh one wallet snapshot and accept native updates without Jito tips", async () => {
+  const account = { wallet: "fixture-wallet", lane: "fixture-lane", apiUrl: "https://fixture.invalid", access: "synthetic" } as Account;
+  const client = new FossaClient({} as Store, account, () => {}), now = Math.floor(Date.now() / 1000);
+  const fees = { available: true, updatedAt: now, expiresAt: now + 90, baselineMicroLamports: 1000, baselineFloorLamports: 1000, baselineCapLamports: 5000 };
+  const preconnect = globalThis.fetch.preconnect;
+  const fetch = spyOn(globalThis, "fetch").mockImplementation(Object.assign(async (_input: Parameters<typeof globalThis.fetch>[0], options?: Parameters<typeof globalThis.fetch>[1]) => {
+    expect(new Headers(options?.headers).get("authorization")).toBe("Bearer synthetic");
+    return Response.json({ wallet: account.wallet, lane: account.lane, transactionFees: fees });
+  }, { preconnect }));
+  try {
+    expect((await client["priority"](100000)).lamports).toBe(1000n);
+    client["acceptFees"]({ baselineMicroLamports: 0, baselineFloorLamports: 1000, baselineCapLamports: 5000 });
+    expect((await client["priority"](100000)).lamports).toBe(1000n);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    client["transactionFees"] = undefined;
+    fetch.mockImplementation(Object.assign(async () => {
+      client["acceptFees"]({ ...fees, baselineFloorLamports: 2000 });
+      return Response.json({ wallet: account.wallet, lane: account.lane, transactionFees: fees });
+    }, { preconnect }));
+    expect((await client["priority"](100000)).lamports).toBe(2000n);
+    client["transactionFees"] = undefined;
+    fetch.mockResolvedValue(Response.json({ wallet: "another-wallet", lane: account.lane, transactionFees: fees }));
+    await expect(client["priority"](100000)).rejects.toThrow("another wallet");
+  } finally { fetch.mockRestore(); }
 });
 
 test("stopping during compute measurement never signs or journals a new transaction", async () => {

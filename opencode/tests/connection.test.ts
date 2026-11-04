@@ -14,7 +14,7 @@ test("native live connection authenticates, restores watches, reconnects, and st
     if (server.upgrade(request)) return;
     return new Response("Invalid upgrade", { status: 400 });
   }, websocket: {
-    open(socket) { connections++; socket.send(JSON.stringify({ type: "chain", data: { blockhash: "fixture", maxAgeMs: 60000 } })); },
+    open(socket) { connections++; socket.send(JSON.stringify({ type: "fees", data: { baselineMicroLamports: 1000, baselineFloorLamports: 1000, baselineCapLamports: 5000 } })); socket.send(JSON.stringify({ type: "chain", data: { blockhash: "fixture", maxAgeMs: 60000 } })); },
     message(socket, data) { if (JSON.parse(String(data)).watch === "fixture-booking") { messages++; if (connections === 1) socket.close(); } },
   } });
   const client = new FossaClient(store, { walletId: "fixture", wallet: "fixture", lane: "fixture", apiUrl: server.url.origin, name: "Fixture", access: "fixture-access", refresh: "fixture-refresh", expires: 0 }, () => {});
@@ -23,6 +23,7 @@ test("native live connection authenticates, restores watches, reconnects, and st
     client["watchers"].set("fixture-booking", () => {}); client["connect"]();
     const deadline = Date.now() + 2000; while (messages < 2 && Date.now() < deadline) await Bun.sleep(5);
     expect(messages).toBe(2); expect(client.chain?.blockhash).toBe("fixture"); expect(client.status.connected).toBe(true);
+    expect((await client["priority"](100000)).lamports).toBe(1000n);
     expect(authorization).toEqual(["Bearer fixture-access", "Bearer fixture-access"]);
     await client.drain(); const stopped = connections; await Bun.sleep(20); expect(connections).toBe(stopped);
   } finally { client.stop(); server.stop(true); store.close(); rmSync(directory, { recursive: true, force: true }); }

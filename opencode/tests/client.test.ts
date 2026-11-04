@@ -39,6 +39,7 @@ async function fixture(customError = 2, retries = 0, scoped = false) {
       sockets.add(socket);
       if (socket.data.live) {
         socket.send(JSON.stringify({ type: "catalog", data: catalog }));
+        socket.send(JSON.stringify({ type: "fees", data: { available: true, updatedAt: Math.floor(Date.now() / 1000), expiresAt: Math.floor(Date.now() / 1000) + 90, baselineMicroLamports: 1000, baselineFloorLamports: 1000, baselineCapLamports: 5000 } }));
         socket.send(JSON.stringify({ type: "chain", data: { blockhash: (await Keypair.generate()).publicKey.toString(), lastValidBlockHeight: 500, bookingRent: "1000", signatureFee: "5000", maxAgeMs: 30_000 } }));
       }
     },
