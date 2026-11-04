@@ -2,9 +2,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { AddressLookupTableAccount, Keypair, Transaction, TransactionInstruction, VersionedTransaction } from "@solana/web3.js";
 import { Buffer } from "buffer";
-import { compileBookingTransaction } from "../src/booking-transaction";
-import { providerQuotaAvailable } from "../src/provider-limits";
-import { providerLimitPageAddress, providerLimitPages } from "../src/provider-wallet";
+import { compileBookingTransaction } from "../src/inference/booking-transaction";
+import { providerQuotaAvailable } from "../src/inference/provider-limits";
+import { providerLimitPageAddress, providerLimitPages } from "../src/inference/provider-wallet";
 
 test("provider quota expires without catalog writes and malformed counters fail closed", () => {
   const provider = { providerLimits: { global: { concurrency: 300, quota: 300, quotaWindowSeconds: 60 }, wallet: { concurrency: 300, quota: 300, quotaWindowSeconds: 60 } }, quotaUsed: 300, quotaWindowEnd: 120 };

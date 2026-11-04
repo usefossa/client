@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { Store } from "../src/store";
+import { Store } from "../src/account/store";
 
 test("API setting persists, rejects unsafe endpoints, and isolates old credentials", async () => {
   const directory = mkdtempSync(join(tmpdir(), "fossa-endpoint-")), store = new Store(directory);

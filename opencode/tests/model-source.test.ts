@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { createModelSource } from "../src/model-source";
+import { createModelSource } from "../src/ui/model-source";
 import type { ModelDetails } from "../src/types";
 
 const value: ModelDetails = { id: "test", name: "Test", settings: { mode: "balanced", minSpeed: 0, zdrOnly: false }, offers: [{ provider: "Provider", wallet: "wallet", url: "https://example.com", input: 0.1, output: 0.2, cached: 0.03, speed: 100, zdr: true }] };

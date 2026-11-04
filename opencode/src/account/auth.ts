@@ -1,9 +1,9 @@
 import { createHash, generateKeyPairSync, privateDecrypt, randomInt, constants } from "node:crypto";
 import { Keypair } from "@solana/web3.js";
-import { api, config, safeUrl } from "./api";
+import { api, config, safeUrl } from "../api";
 import { signMessage } from "./signing";
 import { Store, parseKey } from "./store";
-import { FossaError, type Account, type PublicConfig, type WalletSecrets } from "./types";
+import { FossaError, type Account, type PublicConfig, type WalletSecrets } from "../types";
 
 type Identity = Pick<Account, "wallet" | "lane" | "access" | "refresh" | "expires">;
 type Device = { id: string; pollToken: string; code: string; url: string; expires: number };

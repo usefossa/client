@@ -1,4 +1,4 @@
-import type { ProviderLimitState } from "./types";
+import type { ProviderLimitState } from "../types";
 export function providerQuotaAvailable(provider: ProviderLimitState, now = Date.now() / 1000) {
   if (!provider.providerLimits) return true;
   const quota = provider.providerLimits.global?.quota;

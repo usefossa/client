@@ -5,9 +5,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Keypair, PublicKey, Transaction, TransactionInstruction } from "@solana/web3.js";
 import bs58 from "bs58";
-import { signMessage } from "../src/signing";
+import { signMessage } from "../src/account/signing";
 import { verifyMessage } from "./signing";
-import { Store, parseKey, type Pending } from "../src/store";
+import { Store, parseKey, type Pending } from "../src/account/store";
 import type { Account } from "../src/types";
 
 const directories: string[] = [];

@@ -1,5 +1,5 @@
 import { providerQuotaAvailable } from "./provider-limits";
-import type { BookingRate, MarketModel, Offer, Settings } from "./types";
+import type { BookingRate, MarketModel, Offer, Settings } from "../types";
 
 export const defaultSettings: Settings = { mode: "balanced", minSpeed: 0, zdrOnly: false, advancedRouting: false, desiredConcurrency: null, minimumBookingRate: null, modelCheckpoint: "", inputModalities: 1, outputModalities: 1, minContextTokens: null, maxInputTokens: null, maxOutputTokens: null };
 export const priceFields = ["maxInputPrice", "maxCachedPrice", "maxOutputPrice"] as const;

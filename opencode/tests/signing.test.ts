@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { signMessage } from "../src/signing";
+import { signMessage } from "../src/account/signing";
 import { verifyMessage } from "./signing";
 
 // rfc 8032, section 7.1, test 1: public test material only.

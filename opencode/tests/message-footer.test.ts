@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { installMessageFooters } from "../src/message-footer";
+import { installMessageFooters } from "../src/ui/message-footer";
 import { BoxRenderable, RGBA, TextNodeRenderable, TextRenderable } from "@opentui/core";
 import { createTestRenderer } from "@opentui/core/testing";
 import { createRoot } from "solid-js";

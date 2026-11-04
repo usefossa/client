@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { BoxRenderable, RGBA, ScrollBoxRenderable, TextRenderable, type Renderable } from "@opentui/core";
 import { createTestRenderer } from "@opentui/core/testing";
 import type { Context } from "@opencode/plugin/tui/context";
-import { installModelPicker } from "../src/model-picker";
+import { installModelPicker } from "../src/ui/model-picker";
 import type { ModelDetails } from "../src/types";
 import { getOwner } from "solid-js";
 

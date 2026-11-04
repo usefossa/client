@@ -1,14 +1,14 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { bookingPending, readProviderFailure } from "./provider-response";
+import { bookingPending, readProviderFailure } from "./inference/provider-response";
 import { Credential, Integration, Model, Plugin, Provider } from "@opencode/plugin";
 import type { RpcCallContext } from "@opencode/plugin/promise/rpc";
 import { generate } from "random-words";
 import { api, config, DEFAULT_API_URL, refreshAccount, safeUrl } from "./api";
-import { importWallet, quickConnect } from "./auth";
-import { FossaClient } from "./client";
+import { importWallet, quickConnect } from "./account/auth";
+import { FossaClient } from "./inference/client";
 import { Fossa } from "./rpc";
-import { localStore } from "./store";
-import { defaultSettings, eligible, rankOffers, validateSettings, modelCheckpoints, routingRequirements, modelLimits } from "./routing";
+import { localStore } from "./account/store";
+import { defaultSettings, eligible, rankOffers, validateSettings, modelCheckpoints, routingRequirements, modelLimits } from "./inference/routing";
 import { FossaError, type Account, type Catalog, type PublicConfig, type Settings, type Status } from "./types";
 
 const drainKey = Symbol.for("fossa.opencode.transport-drain");

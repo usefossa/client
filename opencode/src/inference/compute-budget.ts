@@ -1,6 +1,6 @@
 import { compileBookingTransaction } from "./booking-transaction";
 import { ComputeBudgetProgram, type Connection, type ConnectionConfig, type AddressLookupTableAccount, type Transaction } from "@solana/web3.js";
-import { FossaError } from "./types";
+import { FossaError } from "../types";
 
 // web3.js omits sigVerify:false; the authenticated rpc requires it explicitly.
 export const simulationMiddleware: NonNullable<ConnectionConfig["fetchMiddleware"]> = (url, options, next) => {

@@ -2,8 +2,8 @@ import { expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Store, type Pending } from "../src/store";
-import { FossaClient } from "../src/client";
+import { Store, type Pending } from "../src/account/store";
+import { FossaClient } from "../src/inference/client";
 
 test("request timing lookup isolates wallet, session and flow and skips current request", () => {
   const directory = mkdtempSync(join(tmpdir(), "fossa-previous-")), store = new Store(directory);

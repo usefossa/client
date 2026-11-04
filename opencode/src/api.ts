@@ -1,5 +1,5 @@
 import { FossaError, type Account, type PublicConfig } from "./types";
-import { providerError } from "./provider-response";
+import { providerError } from "./inference/provider-response";
 
 export const DEFAULT_API_URL = "https://api.fossa.ag";
 

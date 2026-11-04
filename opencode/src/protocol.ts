@@ -2,7 +2,7 @@ type Message = { role?: unknown; content?: unknown; tool_calls?: unknown; tool_c
 const fields = new Set(["model", "messages", "max_tokens", "max_completion_tokens", "stream", "reasoning_effort", "tools", "tool_choice", "parallel_tool_calls", "temperature", "top_p", "frequency_penalty", "presence_penalty", "seed", "stop", "response_format", "stream_options", "store", "n", "logprobs"]);
 
 export function inputBound(body: { messages: unknown; tools?: unknown }, contextTokens?: number) {
-  // reserve the full context for image requests until upstream exposes a trustworthy vision tokenizer.
+  // reserve full context for image requests without a verified vision tokenizer.
   if (contextTokens && Array.isArray(body.messages) && body.messages.some(message => Array.isArray(message?.content) && message.content.some((part: any) => part?.type === "image_url"))) return contextTokens;
   const bytes = Buffer.byteLength(JSON.stringify(body.messages)) + (body.tools ? Buffer.byteLength(JSON.stringify(body.tools)) + 32 : 0) + 512;
   return bytes;

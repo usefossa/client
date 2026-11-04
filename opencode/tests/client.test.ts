@@ -1,19 +1,19 @@
 import { expect, test } from "bun:test";
 import { Connection, Keypair, PublicKey, Transaction } from "@solana/web3.js";
-import { getAssociatedTokenAddress, TOKEN_PROGRAM_ID } from "../src/token";
+import { getAssociatedTokenAddress, TOKEN_PROGRAM_ID } from "../src/account/token";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import bs58 from "bs58";
 import { verifyMessage } from "./signing";
-import { Store } from "../src/store";
-import { FossaClient } from "../src/client";
+import { Store } from "../src/account/store";
+import { FossaClient } from "../src/inference/client";
 import type { Account, Catalog, PublicConfig } from "../src/types";
 import { make } from "@opencode/ai/promise";
 import { configure } from "@opencode/ai/providers/openai-compatible";
 import { rustProvider } from "./provider";
-import { listRoutingAddresses, providerWalletAddress } from "../src/provider-wallet";
+import { listRoutingAddresses, providerWalletAddress } from "../src/inference/provider-wallet";
 
 const discriminator = (name: string) => createHash("sha256").update(name).digest().subarray(0, 8);
 const providerTest = test.skipIf(!process.env.FOSSA_PROVIDER_ROOT);

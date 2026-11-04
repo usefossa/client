@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import type { BoxRenderable, TextRenderable } from "@opentui/core";
 import type { Context } from "@opencode/plugin/tui/context";
-import type { ModelDetails } from "./types";
+import type { ModelDetails } from "../types";
 
 export const price = (value: number) => `$${Number(value.toFixed(6))}`;
 export function openProvider(context: Context, url: string, title = "Provider profile") {

@@ -1,8 +1,8 @@
 import type { TextNodeRenderable, TextRenderable } from "@opentui/core";
 import type { SessionMessageAssistant } from "@opencode/client";
 import type { Context } from "@opencode/plugin/tui/context";
-import { Fossa } from "./rpc";
-import type { RoutedRequest } from "./types";
+import { Fossa } from "../rpc";
+import type { RoutedRequest } from "../types";
 import { createEffect, createMemo, createSignal, untrack } from "opentui:runtime-module:solid-js";
 import { visibleNodes } from "./render-tree";
 

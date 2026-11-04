@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { bookingPending, providerError, readProviderFailure } from "../src/provider-response";
+import { bookingPending, providerError, readProviderFailure } from "../src/inference/provider-response";
 
 test("structured and legacy booking errors retry only before acceptance", () => {
   for (const value of [{ error: "Booking unavailable" }, { error: { message: "Booking unavailable", code: "booking_unavailable" } }, { error: { message: "Synchronizing", code: "booking_generation_changed" } }]) {

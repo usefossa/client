@@ -1,7 +1,7 @@
 import { expect, mock, test } from "bun:test";
 import type { Context } from "@opencode/plugin/tui/context";
 import type { PluginInfo } from "@opencode/client";
-import { installUpdateNotice } from "../src/updates";
+import { installUpdateNotice } from "../src/ui/updates";
 
 function fixture(local = false) {
   const target = "github:usefossa/client#::path:opencode", location = { directory: "/fixture" };

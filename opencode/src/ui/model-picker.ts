@@ -4,7 +4,7 @@ import { createEffect, createRoot, untrack } from "opentui:runtime-module:solid-
 import { createModelSource, type ModelSource } from "./model-source";
 import { openProvider } from "./provider-row";
 import { isText, textOf, visibleNodes } from "./render-tree";
-import type { ModelDetails } from "./types";
+import type { ModelDetails } from "../types";
 
 const commandId = "fossa.model-pane.toggle", gap = 2;
 const bindings = ["ctrl+g", "ctrl+y", "ctrl+]", "ctrl+\\"];

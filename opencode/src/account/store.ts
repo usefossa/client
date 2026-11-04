@@ -5,9 +5,9 @@ import { dirname, join } from "node:path";
 import { createCipheriv, createDecipheriv, randomBytes, scrypt, randomUUID, createHash } from "node:crypto";
 import { Keypair, Transaction } from "@solana/web3.js";
 import bs58 from "bs58";
-import { defaultSettings, priceFields, validateSettings } from "./routing";
-import { defaultRakeback, validateRakeback } from "./rakeback";
-import { FossaError, type Account, type Settings, type WalletSecrets } from "./types";
+import { defaultSettings, priceFields, validateSettings } from "../inference/routing";
+import { defaultRakeback, validateRakeback } from "../inference/rakeback";
+import { FossaError, type Account, type Settings, type WalletSecrets } from "../types";
 
 const derive = (passphrase: string, salt: Buffer) => new Promise<Buffer>((resolve, reject) => scrypt(passphrase, salt, 32, { N: 65536, r: 8, p: 1, maxmem: 128 * 1024 * 1024 }, (error, key) => error ? reject(error) : resolve(key)));
 type Sealed = { protection?: "device" | "passphrase"; salt: string; iv: string; tag: string; ciphertext: string };
@@ -36,7 +36,7 @@ export class Store {
   readonly db: Database;
   private keys = new Map<string, WalletSecrets>();
   private journalMigrated = false;
-  constructor(directory = join(homedir(), ".local", "share", "fossa-opencode")) {
+  constructor(directory = join(homedir(), "../.local", "share", "fossa-opencode")) {
     mkdirSync(directory, { recursive: true, mode: 0o700 }); chmodSync(directory, 0o700);
     const path = join(directory, "wallets.sqlite"); this.db = new Database(path, { create: true }); chmodSync(path, 0o600);
     this.db.exec("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=10000; CREATE TABLE IF NOT EXISTS wallets(id TEXT PRIMARY KEY,address TEXT NOT NULL,name TEXT NOT NULL,sealed TEXT NOT NULL,settings TEXT); CREATE TABLE IF NOT EXISTS pending(id TEXT PRIMARY KEY,wallet TEXT NOT NULL,state TEXT NOT NULL,created INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS pending_wallet_created ON pending(wallet,created); CREATE TABLE IF NOT EXISTS model_settings(wallet TEXT NOT NULL,model TEXT NOT NULL,settings TEXT NOT NULL,PRIMARY KEY(wallet,model)); CREATE TABLE IF NOT EXISTS locks(wallet TEXT PRIMARY KEY,owner TEXT NOT NULL,pid INTEGER NOT NULL,expires INTEGER NOT NULL)");

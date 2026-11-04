@@ -1,6 +1,6 @@
 import type { Context } from "@opencode/plugin/tui/context";
-import { Fossa } from "./rpc";
-import { errorMessage, type ModelDetails } from "./types";
+import { Fossa } from "../rpc";
+import { errorMessage, type ModelDetails } from "../types";
 
 type Listener = (value?: ModelDetails, error?: string) => void;
 type Entry = { value?: ModelDetails; at: number; version: number; error?: string; pending?: Promise<ModelDetails>; listeners: Set<Listener> };

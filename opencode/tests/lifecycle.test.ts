@@ -3,8 +3,8 @@ import { Keypair } from "@solana/web3.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { FossaClient } from "../src/client";
-import { Store } from "../src/store";
+import { FossaClient } from "../src/inference/client";
+import { Store } from "../src/account/store";
 
 for (const action of ["reload", "endpoint"]) for (const phase of ["booking", "stream"]) test(`${action} drains ${phase} before stopping client or relocking protected wallet`, async () => {
   const directory = mkdtempSync(join(tmpdir(), "fossa-drain-")), store = new Store(directory), owner = await Keypair.generate();

@@ -1,4 +1,4 @@
-import { FossaError, type RakebackSettings } from "./types";
+import { FossaError, type RakebackSettings } from "../types";
 
 export const defaultRakeback: RakebackSettings = { autoRakeback: false, rakebackMode: "interval", rakebackIntervalMinutes: 60, rakebackThresholdAtomic: "1000000" };
 export const rakebackIntervals = [15, 60, 360] as const;

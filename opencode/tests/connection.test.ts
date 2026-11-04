@@ -2,8 +2,8 @@ import { expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { FossaClient } from "../src/client";
-import { Store } from "../src/store";
+import { FossaClient } from "../src/inference/client";
+import { Store } from "../src/account/store";
 
 test("native live connection authenticates, restores watches, reconnects, and stops", async () => {
   const directory = mkdtempSync(join(tmpdir(), "fossa-live-")), store = new Store(directory);

@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { ComputeBudgetProgram, Keypair, Transaction, TransactionInstruction, Connection, type VersionedTransaction } from "@solana/web3.js";
-import { measureCompute, simulationMiddleware } from "../src/compute-budget";
+import { measureCompute, simulationMiddleware } from "../src/inference/compute-budget";
 
 async function transaction(count = 1) {
   const payer = (await Keypair.generate()).publicKey, program = (await Keypair.generate()).publicKey;

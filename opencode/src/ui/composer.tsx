@@ -3,8 +3,8 @@ import type { Context } from "@opencode/plugin/tui/context";
 import { onCleanup } from "opentui:runtime-module:solid-js";
 import { jsx } from "opentui:runtime-module:%40opentui%2Fsolid%2Fjsx-runtime";
 import { providerRow } from "./provider-row";
-import { quotaText } from "./routing";
-import type { ModelDetails } from "./types";
+import { quotaText } from "../inference/routing";
+import type { ModelDetails } from "../types";
 
 type Mount = { anchor?: BoxRenderable; sample?: TextRenderable; normal: () => boolean; top?: BoxRenderable; bottom?: BoxRenderable; balance?: TextRenderable; home?: Renderable; homeWidth?: number; controlsWidth?: number; inputs?: readonly unknown[] };
 const remove = (node?: Renderable) => { if (node && !node.isDestroyed) { node.parent?.remove(node); node.destroyRecursively(); } };

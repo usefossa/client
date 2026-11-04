@@ -4,9 +4,9 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ComputeBudgetProgram, Connection, Keypair, PublicKey, SystemProgram, Transaction, TransactionInstruction } from "@solana/web3.js";
-import { FossaClient } from "../src/client";
-import { Store } from "../src/store";
-import { getAssociatedTokenAddress, TOKEN_PROGRAM_ID } from "../src/token";
+import { FossaClient } from "../src/inference/client";
+import { Store } from "../src/account/store";
+import { getAssociatedTokenAddress, TOKEN_PROGRAM_ID } from "../src/account/token";
 import type { Account, PublicConfig, WalletState } from "../src/types";
 
 for (const setup of [false, true]) test(`journal preserves v1 signed transaction bytes with ${setup ? "two signers" : "one signer"}`, async () => {

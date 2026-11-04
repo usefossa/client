@@ -2,8 +2,8 @@ import { expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { defaultSettings, eligible, modelCheckpoints, rankOffers, routingRequirements, validateSettings } from "../src/routing";
-import { Store } from "../src/store";
+import { defaultSettings, eligible, modelCheckpoints, rankOffers, routingRequirements, validateSettings } from "../src/inference/routing";
+import { Store } from "../src/account/store";
 import type { MarketModel, Offer } from "../src/types";
 
 const offer = (slot: number, rate: number, speed: number, zdr = false): Offer => ({ checkpoint: "07".repeat(32), checkpointId: "example/model@1017", checkpointName: "1017", checkpointOrder: 0, modalities: { input: ["text"], output: ["text"] }, contextTokens: 65536, inputBoundTokens: 65536, outputTokens: 8192, slot, provider: { wallet: `provider-${slot}`, name: `Provider ${slot}`, endpoint: "https://provider.invalid/v1/chat/completions" }, inputRate: rate, cachedRate: rate, outputRate: rate, speed, available: true, active: true, private: zdr, capacity: 10, activeBookings: 0 });

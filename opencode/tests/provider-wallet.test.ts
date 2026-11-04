@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Keypair, PublicKey } from "@solana/web3.js";
 import { Buffer } from "buffer";
-import { cachedProviderWallet, decodeProviderWallet, prepareProviderWallet, providerWalletAddress } from "../src/provider-wallet";
+import { cachedProviderWallet, decodeProviderWallet, prepareProviderWallet, providerWalletAddress } from "../src/inference/provider-wallet";
 
 test("provider wallet preparation binds identity and grows full storage without resetting counters", async () => {
   const program = (await Keypair.generate()).publicKey, market = (await Keypair.generate()).publicKey, owner = (await Keypair.generate()).publicKey;

@@ -3,8 +3,8 @@ import { Keypair } from "@solana/web3.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { FossaClient } from "../src/client";
-import { Store, type Pending } from "../src/store";
+import { FossaClient } from "../src/inference/client";
+import { Store, type Pending } from "../src/account/store";
 
 test("transport bounds every provider error and preserves uncertain payment recovery", async () => {
   const directory = mkdtempSync(join(tmpdir(), "fossa-error-transport-")), store = new Store(directory), owner = await Keypair.generate();

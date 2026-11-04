@@ -3,12 +3,12 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Connection, Keypair } from "@solana/web3.js";
-import { signMessage } from "../src/signing";
+import { signMessage } from "../src/account/signing";
 import { verifyMessage } from "./signing";
 import bs58 from "bs58";
 import { generateKeyPairSync, privateDecrypt, constants, createHash } from "node:crypto";
-import { Store } from "../src/store";
-import { importWallet, quickConnect } from "../src/auth";
+import { Store } from "../src/account/store";
+import { importWallet, quickConnect } from "../src/account/auth";
 import { api } from "../src/api";
 
 const base = process.env.FOSSA_TEST_API_URL ?? "", origin = process.env.FOSSA_TEST_ORIGIN ?? "http://127.0.0.1:3000";

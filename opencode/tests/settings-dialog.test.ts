@@ -4,7 +4,7 @@ import { RGBA, InputRenderable, type Renderable, type BoxRenderable } from "@ope
 import { testRender, useRenderer } from "@opentui/solid";
 import { createSignal } from "solid-js";
 import { jsx, type JSX } from "@opentui/solid/jsx-runtime";
-import { settingsDialog } from "../src/settings-dialog";
+import { settingsDialog } from "../src/ui/settings-dialog";
 
 test("packaged dialog keeps navigation, page updates, search and prompts reactive", async () => {
   const base = RGBA.fromHex("#ffffff"), muted = RGBA.fromHex("#888888"), focused = RGBA.fromHex("#444444");

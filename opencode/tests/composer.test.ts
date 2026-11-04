@@ -3,7 +3,7 @@ import type { Context } from "@opencode/plugin/tui/context";
 import { RGBA, type BoxRenderable } from "@opentui/core";
 import { testRender, useRenderer } from "@opentui/solid";
 import { jsx, type JSX } from "@opentui/solid/jsx-runtime";
-import { installComposer } from "../src/composer";
+import { installComposer } from "../src/ui/composer";
 import type { ModelDetails } from "../src/types";
 
 test("provider preview shows connection failures and recovers without stale offers", async () => {
