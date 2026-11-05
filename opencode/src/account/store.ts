@@ -41,6 +41,7 @@ export class Store {
     if (process.platform !== "win32") chmodSync(directory, 0o700);
     const path = join(directory, "wallets.sqlite"); this.db = new Database(path, { create: true });
     if (process.platform !== "win32") chmodSync(path, 0o600);
+    this.db.exec("PRAGMA synchronous=FULL");
     this.db.exec("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=10000; CREATE TABLE IF NOT EXISTS wallets(id TEXT PRIMARY KEY,address TEXT NOT NULL,name TEXT NOT NULL,sealed TEXT NOT NULL,settings TEXT); CREATE TABLE IF NOT EXISTS pending(id TEXT PRIMARY KEY,wallet TEXT NOT NULL,state TEXT NOT NULL,created INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS pending_wallet_created ON pending(wallet,created); CREATE TABLE IF NOT EXISTS model_settings(wallet TEXT NOT NULL,model TEXT NOT NULL,settings TEXT NOT NULL,PRIMARY KEY(wallet,model)); CREATE TABLE IF NOT EXISTS locks(wallet TEXT PRIMARY KEY,owner TEXT NOT NULL,pid INTEGER NOT NULL,expires INTEGER NOT NULL)");
     this.migrateJournal();
   }
@@ -230,6 +231,7 @@ export class Store {
     const saved = this.db.query("SELECT state FROM pending WHERE id=?").get(value.id) as { state: string } | null;
     const previous = saved ? JSON.parse(saved.state) as Pending : undefined;
     if (previous) {
+      if (["signature", "transaction", "expiry", "bodyHash", "model"].some(key => previous[key as keyof Pending] !== value[key as keyof Pending])) throw new FossaError("JOURNAL_CHANGED", "Saved signed transaction changed. Preserve its original bytes and recover before retrying.");
       if (previous.wallet !== value.wallet || previous.booking !== value.booking || previous.generation !== value.generation || previous.scope && value.scope && Object.entries(previous.scope).some(([key, field]) => field !== undefined && field !== value.scope![key as keyof JournalScope])) throw new FossaError("JOURNAL_CHANGED", "Saved transaction identity changed. Preserve the journal and recover before retrying.");
       const merged = { ...previous, ...Object.fromEntries(Object.entries(value).filter(([, field]) => field !== undefined)) } as Pending;
       const proven = ["settled", "released"].includes(previous.stage);

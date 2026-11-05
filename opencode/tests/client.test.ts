@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { Connection, Keypair, PublicKey, Transaction } from "@solana/web3.js";
+import { Connection, Keypair, PublicKey, Transaction, VersionedTransaction } from "@solana/web3.js";
 import { getAssociatedTokenAddress, TOKEN_PROGRAM_ID } from "../src/account/token";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -55,6 +55,7 @@ async function fixture(customError = 2, retries = 0, scoped = false) {
     if (url.pathname === "/rpc" && request.method === "GET" && server.upgrade(request, { data: { subscribed: false } })) return;
     if (url.pathname === "/v1/opencode/live" && server.upgrade(request, { data: { subscribed: false, live: true } })) return;
     if (url.pathname === "/v1/config") return json(cfg);
+    if (url.pathname.startsWith("/v1/chat/completions")) return fetch(new Request(providerServer.url + url.pathname + url.search, request));
     if (url.pathname === "/v1/market/catalog") { catalogReads++; return json(catalog); }
     if (url.pathname === "/v1/opencode/receipts") return json({ receipts: bookData[148] === 5 ? store.pending(owner.publicKey.toString()).filter(row => row.generation === bookData.readBigUInt64LE(152).toString()).map(row => ({ booking: row.booking, generation: row.generation, charge: bookData.readBigUInt64LE(160).toString() })) : [] });
     if (url.pathname === "/upstream/chat/completions") {
@@ -76,7 +77,7 @@ async function fixture(customError = 2, retries = 0, scoped = false) {
       expect(Buffer.from(tx.instructions[0].data).readUInt32LE(1)).toBe(1_400_000);
       result = { context: { slot: 100 }, value: { err: null, unitsConsumed: 30_000, logs: [] } };
     }
-    else if (body.method === "getSignatureStatuses") result = { context: { slot: 100 }, value: body.params[0].map((value: string) => !hideStatus && (confirmedSignatures.has(value) || failures.has(value)) ? { slot: 100, confirmations: 1, confirmationStatus: "confirmed", err: failures.has(value) ? { InstructionError: [1, { Custom: customError }] } : null } : null) };
+    else if (body.method === "getSignatureStatuses") result = { context: { slot: 100 }, value: body.params[0].map((value: string) => !hideStatus && (confirmedSignatures.has(value) || failures.has(value)) ? { slot: 100, confirmations: failures.has(value) ? null : 1, confirmationStatus: failures.has(value) ? "finalized" : "confirmed", err: failures.has(value) ? { InstructionError: [1, { Custom: customError }] } : null } : null) };
     else if (body.method === "getProgramAccounts") {
       const options = body.params[1];
       expect(options.commitment).toBe(options.filters.some((filter: { dataSize?: number; memcmp?: { offset: number; bytes: string } }) => filter.memcmp?.offset === 0 && Buffer.from(bs58.decode(filter.memcmp.bytes)).equals(discriminator("account:FilteredBooking"))) ? "processed" : "confirmed");
@@ -145,7 +146,7 @@ async function fixture(customError = 2, retries = 0, scoped = false) {
   try { providerStream = Bun.serve({ hostname: "127.0.0.1", port: Number(server.port) + 1, fetch(request, socket) { if (socket.upgrade(request, { data: undefined })) return; return new Response(null, { status: 400 }); }, websocket: { message(socket, message) { const request = JSON.parse(String(message)); socket.send(JSON.stringify({ jsonrpc: "2.0", id: request.id, result: request.method.endsWith("Unsubscribe") ? true : request.id })); } } }); }
   catch (error) { server.stop(true); store.close(); rmSync(directory, { recursive: true, force: true }); if ((error as { code?: string }).code === "EADDRINUSE" && retries < 10) return fixture(customError, retries + 1, scoped); throw error; }
   providerServer = await rustProvider({ rpc: cfg.solanaRpc, program: cfg.programId, market: cfg.market, mint: cfg.usdcMint, seed: [...provider.secretKey.slice(0, 32)] });
-  catalog.models[0].offers[0].provider.endpoint = providerServer.url + "/v1/chat/completions";
+  catalog.models[0].offers[0].provider.endpoint = server.url.origin + "/v1/chat/completions";
   const account: Account = { walletId: "fixture-wallet", wallet: owner.publicKey.toString(), lane: lane.publicKey.toString(), name: "Fixture", apiUrl: server.url.origin, rpcUrl: server.url.origin + "/rpc", rpcWsUrl: server.url.origin.replace("http:", "ws:") + "/rpc", access: "fixture-access", refresh: "fixture-refresh", expires: Date.now() + 100000 };
   await store.save(account, { owner: [...owner.secretKey], lane: [...lane.secretKey], bookings: { [booking.publicKey.toString()]: [...booking.secretKey] } }, "fixture wallet passphrase");
   const client = new FossaClient(store, account, () => {}); await client.start();
@@ -313,7 +314,7 @@ providerTest("recovery cannot overwrite a newer provider dispatch while account 
   } finally { release(); await f.close(); }
 });
 
-providerTest("confirmed missing-booking failure refreshes pool and safely retries once", async () => {
+providerTest("finalized missing-booking failure refreshes pool and safely retries once", async () => {
   const f = await fixture();
   try {
     f.staleBooking();
@@ -338,7 +339,7 @@ providerTest("streamed booking deletion removes storage without disconnecting na
   } finally { await f.close(); }
 });
 
-providerTest("other confirmed program errors never trigger a replacement booking", async () => {
+providerTest("other finalized program errors never trigger a replacement booking", async () => {
   const f = await fixture(20);
   try {
     f.staleBooking();
@@ -554,9 +555,10 @@ providerTest("cancellation during signing discards unsubmitted bytes without jou
     const body = JSON.stringify({ model: "fixture/coder", messages: [{ role: "user", content: "hello" }], max_tokens: 128 });
     await f.client.request("original", "fixture/coder", body, "session", "primary", new AbortController().signal);
     const row = f.store.request("original", f.account.wallet)!;
-    const tx = Transaction.from(Buffer.from(row.transaction, "base64")), sign = tx.sign.bind(tx), controller = new AbortController();
-    tx.sign = async (...signers) => { const result = await sign(...signers); controller.abort(); return result; };
-    await expect(f.client["journal"](tx, [f.owner], { ...row, id: "discarded" }, 0, controller.signal)).rejects.toThrow();
+    const tx = Transaction.from(Buffer.from(row.transaction, "base64")), sign = VersionedTransaction.prototype.sign, controller = new AbortController();
+    VersionedTransaction.prototype.sign = async function (signers) { const result = await sign.call(this, signers); controller.abort(); return result; };
+    try { await expect(f.client["journal"](tx, [f.owner], { ...row, id: "discarded" }, 0, controller.signal)).rejects.toThrow(); }
+    finally { VersionedTransaction.prototype.sign = sign; }
     expect(f.store.request("discarded", f.account.wallet)).toBeUndefined(); expect(f.submissions()).toBe(1);
   } finally { await f.close(); }
 });

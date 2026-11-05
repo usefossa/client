@@ -1,10 +1,10 @@
 type Message = { role?: unknown; content?: unknown; tool_calls?: unknown; tool_call_id?: unknown; name?: unknown; reasoning_content?: unknown; refusal?: unknown };
 const fields = new Set(["model", "messages", "max_tokens", "max_completion_tokens", "stream", "reasoning_effort", "tools", "tool_choice", "parallel_tool_calls", "temperature", "top_p", "frequency_penalty", "presence_penalty", "seed", "stop", "response_format", "stream_options", "store", "n", "logprobs"]);
 
-export function inputBound(body: { messages: unknown; tools?: unknown }, contextTokens?: number) {
+export function inputBound(body: { messages: unknown; tools?: unknown; response_format?: unknown }, contextTokens?: number) {
   // reserve full context for image requests without a verified vision tokenizer.
   if (contextTokens && Array.isArray(body.messages) && body.messages.some(message => Array.isArray(message?.content) && message.content.some((part: any) => part?.type === "image_url"))) return contextTokens;
-  const bytes = Buffer.byteLength(JSON.stringify(body.messages)) + (body.tools ? Buffer.byteLength(JSON.stringify(body.tools)) + 32 : 0) + 512;
+  const bytes = Buffer.byteLength(JSON.stringify(body.messages)) + (body.tools ? Buffer.byteLength(JSON.stringify(body.tools)) + 32 : 0) + (body.response_format != null ? Buffer.byteLength(JSON.stringify(body.response_format)) + 32 : 0) + 512;
   return bytes;
 }
 export function validateBody(value: unknown, booking: { maxInput: number; maxOutput: number; claimEnd: number }, config: { model: string; speed_tps: number; context_tokens: number; max_input_bound?: number; output_tokens: number; tools: boolean; input?: string[]; effort?: string[] }) {
@@ -54,7 +54,7 @@ export function validateBody(value: unknown, booking: { maxInput: number; maxOut
   const max = body.max_tokens ?? body.max_completion_tokens ?? Math.min(booking.maxOutput, config.output_tokens);
   if (!Number.isSafeInteger(max) || max < 1 || max > booking.maxOutput || max > config.output_tokens || body.max_tokens != null && body.max_completion_tokens != null) throw Error("Output limit exceeded");
   if (inputBound(body as { messages: unknown }, config.context_tokens) > booking.maxInput || booking.maxInput > (config.max_input_bound ?? config.context_tokens)) throw Error("Input limit exceeded");
-  if (inputBound(body as { messages: unknown; tools?: unknown }, config.context_tokens) + max > config.context_tokens) throw Error("Context limit exceeded");
+  if (inputBound(body as { messages: unknown; tools?: unknown; response_format?: unknown }, config.context_tokens) + max > config.context_tokens) throw Error("Context limit exceeded");
   if (Date.now() / 1000 + Math.ceil(max / Math.max(1, config.speed_tps)) + 5 >= booking.claimEnd) throw Error("Booking deadline too short");
   return max;
 }

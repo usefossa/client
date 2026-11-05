@@ -1,11 +1,12 @@
 import { bookingLookupTables, compileBookingTransaction } from "./booking-transaction";
 import { createHash, randomUUID } from "node:crypto";
-import { ComputeBudgetProgram, Connection, Keypair, PublicKey, SystemProgram, Transaction, TransactionInstruction, type AccountInfo } from "@solana/web3.js";
+import { ComputeBudgetProgram, Connection, Keypair, PublicKey, SystemProgram, Transaction, TransactionInstruction, VersionedTransaction, type AccountInfo } from "@solana/web3.js";
 import { cachedProviderWallet, listRoutingAddresses, prepareProviderWallet, providerWalletAddress, providerLimitPages, providerLimitPageAddress } from "./provider-wallet";
 import { sizeCompute, transactionPriority, simulationMiddleware, type BookingComputeState } from "./compute-budget";
 import { createAssociatedTokenAccountIdempotentInstruction, getAssociatedTokenAddress, TOKEN_PROGRAM_ID } from "../account/token";
 import bs58 from "bs58";
-import { providerError, bookingPending } from "./provider-response";
+import { bookingPending, readProviderFailure } from "./provider-response";
+import { providerFetch } from "./provider-fetch";
 import { api, config, safeUrl } from "../api";
 import { signMessage } from "../account/signing";
 import { Store, type Pending } from "../account/store";
@@ -32,6 +33,7 @@ export class FossaClient {
   private rpc!: Connection; private socket?: WebSocket; private retry?: ReturnType<typeof setTimeout>; private timer?: ReturnType<typeof setInterval>;
   private chainUntil = 0; private catalogAt = 0; private walletAt = 0; private stopped = false; private refreshing?: Promise<void>;
   private transactionFees?: TransactionFees;
+  private walletAddresses?: Promise<{ source: string; vault: string }>;
   private feeVersion = 0;
   private catalogWaiters = new Set<() => void>();
   private walletWaiters = new Set<() => void>();
@@ -62,13 +64,17 @@ export class FossaClient {
     const url = new URL(`${this.account.apiUrl}/v1/opencode/live`); url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
     const socket = new LiveSocket(url, { headers: { authorization: `Bearer ${this.account.access}` } }); this.socket = socket;
     socket.onopen = () => { for (const address of this.watchers.keys()) socket.send(JSON.stringify({ watch: address })); };
-    socket.onmessage = event => {
+    socket.onmessage = async event => {
       try {
         const update = JSON.parse(String(event.data));
         if (update.type === "catalog") this.updateCatalog(update.data);
         if (update.type === "chain") { this.chain = update.data ?? undefined; this.chainUntil = Date.now() + (this.chain?.maxAgeMs ?? 0) - 1000; }
         if (update.type === "fees") { this.acceptFees(update.data); return; }
-        if (update.type === "wallet" && update.data.wallet === this.account.wallet && update.data.lane === this.account.lane && update.data.slot >= (this.wallet?.slot ?? 0)) { this.wallet = update.data; this.acceptFees(update.data.transactionFees); this.walletAt = Date.now(); this.wakeWallet(); }
+        if (update.type === "wallet") {
+          const wallet = await this.validateSnapshot(update.data);
+          if (this.stopped || socket !== this.socket) return;
+          if (wallet.slot >= (this.wallet?.slot ?? 0)) { this.wallet = wallet; this.acceptFees(wallet.transactionFees); this.walletAt = Date.now(); this.wakeWallet(); }
+        }
         if (update.type === "receipt" && update.commitment === "confirmed") this.receipt(update.data);
         if (update.type === "resync") void this.refresh().catch(() => {});
         if (update.type === "booking") {
@@ -136,7 +142,7 @@ export class FossaClient {
   async snapshot(minSlot = 0, forceRpc = false): Promise<WalletState> {
     const pool = new Set([...(this.wallet?.bookings ?? []).map(item => item.address), ...Object.keys(this.store.unlocked(this.account.walletId) ? this.store.secrets(this.account.walletId).bookings : {})]);
     if (!this.account.rpcUrl && !forceRpc) {
-      const snapshot = await api<WalletState>(this.account.apiUrl, "/opencode/wallet", { token: this.account.access });
+      const snapshot = await this.validateSnapshot(await api<WalletState>(this.account.apiUrl, "/opencode/wallet", { token: this.account.access }));
       this.acceptFees(snapshot.transactionFees);
       if (snapshot.slot >= minSlot && [...pool].every(address => snapshot.bookings.some(item => item.address === address))) return snapshot;
     }
@@ -150,6 +156,26 @@ export class FossaClient {
     const counter = Buffer.alloc(8); if (ready) user!.data.copy(counter, 0, 112, 120);
     const validToken = token && token.owner.equals(TOKEN_PROGRAM_ID) && token.data.length === 165 && token.data.subarray(0, 32).equals(mint.toBytes()) && token.data.subarray(32, 64).equals(owner.toBytes());
     return { wallet: this.account.wallet, lane: this.account.lane, source: source.toBase58(), vault: vault.toBase58(), ready, lamports: String(balance?.lamports ?? 0), usdcAtomic: validToken ? token.data.readBigUInt64LE(64).toString() : "0", freeAtomic: ready ? user!.data.readBigUInt64LE(72).toString() : "0", generation: counter.readBigUInt64LE().toString(), slot: Number(result.context.slot), bookings: [...pool].flatMap((address, index) => { const value = values[index + 3]; if (!value || !value.lamports && !value.data.length) return []; if (!value.owner.equals(program) || value.data.length !== 520 || !value.data.subarray(0, 8).equals(discriminator("account:FilteredBooking")) || !value.data.subarray(8, 40).equals(owner.toBytes()) || !value.data.subarray(192, 224).equals(lane.toBytes())) throw new FossaError("ACCOUNT_INVALID", "Booking pool identity is invalid."); return [{ address, status: value.data[148], generation: value.data.readBigUInt64LE(152).toString(), rentPayer: new PublicKey(value.data.subarray(256, 288)).toBase58() }]; }) };
+  }
+  private async validateSnapshot(snapshot: WalletState) {
+    const unsigned = (value: unknown) => typeof value === "string" && /^(0|[1-9]\d{0,19})$/.test(value) && BigInt(value) <= 0xffffffffffffffffn;
+    if (!snapshot || snapshot.wallet !== this.account.wallet || snapshot.lane !== this.account.lane || !Number.isSafeInteger(snapshot.slot) || snapshot.slot < 0 || typeof snapshot.ready !== "boolean"
+      || ![snapshot.lamports, snapshot.usdcAtomic, snapshot.freeAtomic, snapshot.generation].every(unsigned) || !Array.isArray(snapshot.bookings)
+      || snapshot.bookings.some(booking => !booking || !Number.isInteger(booking.status) || booking.status < 0 || booking.status > 5 || !unsigned(booking.generation))) throw new FossaError("ACCOUNT_INVALID", "Fossa wallet snapshot is invalid or belongs to another account.");
+    const addresses = await (this.walletAddresses ??= (async () => {
+      const mint = new PublicKey(this.cfg.usdcMint), lane = new PublicKey(this.account.lane), owner = new PublicKey(this.account.wallet);
+      const [authority] = await PublicKey.findProgramAddress([Buffer.from("vault"), lane.toBytes()], new PublicKey(this.cfg.programId));
+      const [source, vault] = await Promise.all([getAssociatedTokenAddress(mint, owner), getAssociatedTokenAddress(mint, authority, true)]);
+      return { source: source.toString(), vault: vault.toString() };
+    })());
+    if (snapshot.source !== addresses.source || snapshot.vault !== addresses.vault) throw new FossaError("ACCOUNT_INVALID", "Fossa wallet token accounts do not match the local signing identity.");
+    const bookings = new Set<string>();
+    for (const booking of snapshot.bookings) {
+      new PublicKey(booking.address); new PublicKey(booking.rentPayer);
+      if (bookings.has(booking.address)) throw new FossaError("ACCOUNT_INVALID", "Fossa wallet contains duplicate booking accounts.");
+      bookings.add(booking.address);
+    }
+    return snapshot;
   }
   private get scope() { return this.cfg ? { program: this.cfg.programId, market: this.cfg.market, lane: this.account.lane, genesis: this.cfg.opencode.mainnetGenesisHash, mint: this.cfg.usdcMint } : undefined; }
   private rows(active = false) { return this.store.pending(this.account.wallet, this.scope, active); }
@@ -212,9 +238,9 @@ export class FossaClient {
     this.broadcast(row);
     this.progress(row.id, { stage: "confirming", message: "Waiting for booking update…" });
   }
-  private async signatureStatuses(signatures: string[]) {
+  private async signatureStatuses(signatures: string[], minimumSlot: number | bigint = 0) {
     const result = await this.rpc.getSignatureStatuses(signatures, { searchTransactionHistory: true });
-    if (!Array.isArray(result?.value) || result.value.length !== signatures.length || result.value.some(status => status !== null && (!status || typeof status !== "object" || !("err" in status) || status.err !== null && (typeof status.err === "string" ? !status.err.length : typeof status.err !== "object" || Array.isArray(status.err) || !Object.keys(status.err).length) || !validSlot(status.slot) || !["processed", "confirmed", "finalized"].includes(status.confirmationStatus ?? "")))) throw Error("Invalid signature status response.");
+    if (!validSlot(result?.context?.slot) || !validSlot(minimumSlot) || result.context.slot < minimumSlot || !Array.isArray(result?.value) || result.value.length !== signatures.length || result.value.some(status => status !== null && (!status || typeof status !== "object" || !("err" in status) || status.err !== null && (typeof status.err === "string" ? !status.err.length : typeof status.err !== "object" || Array.isArray(status.err) || !Object.keys(status.err).length) || !validSlot(status.slot) || status.slot > result.context.slot || !["processed", "confirmed", "finalized"].includes(status.confirmationStatus ?? "")))) throw Error("Invalid signature status response.");
     return result.value;
   }
   private async processed(row: Pending, signal?: AbortSignal, wake?: Promise<number>, confirmed = false) {
@@ -240,7 +266,7 @@ export class FossaClient {
           ]);
           const [status] = statuses;
           if (done) return 0;
-          if (status?.err && ["confirmed", "finalized"].includes(status.confirmationStatus ?? "")) { row.stage = "failed"; row.error = JSON.stringify(status.err, (_key, value) => typeof value === "bigint" ? value.toString() : value); this.store.put(row); throw new FossaError("TRANSACTION_FAILED", row.kind === "rakeback" ? `Rakeback transaction failed: ${row.signature}. No funds were moved.` : `Fossa transaction failed: ${row.signature}. No booking USDC was charged.`); }
+          if (status?.err && status.confirmationStatus === "finalized") { row.stage = "failed"; row.error = JSON.stringify(status.err, (_key, value) => typeof value === "bigint" ? value.toString() : value); this.store.put(row); throw new FossaError("TRANSACTION_FAILED", row.kind === "rakeback" ? `Rakeback transaction failed: ${row.signature}. No funds were moved.` : `Fossa transaction failed: ${row.signature}. No booking USDC was charged.`); }
           if (account?.value?.owner.equals(new PublicKey(this.cfg.programId)) && account.value.data.length === 520 && account.value.data[148] === 0 && Buffer.from(account.value.data).readBigUInt64LE(152).toString() === row.generation) {
             this.watchers.get(row.booking)?.(account.value, Number(account.context.slot), "rpc");
             return Number(account.context.slot);
@@ -251,10 +277,17 @@ export class FossaClient {
             if (done) return 0;
             if (!validSlot(height)) throw Error("Invalid finalized block height.");
             if (height > row.expiry + 5) {
-              const [current] = await this.signatureStatuses([row.signature]);
+              const blockhash = VersionedTransaction.deserialize(Buffer.from(row.transaction, "base64")).message.recentBlockhash;
+              const validity = await this.rpc.isBlockhashValid(blockhash, { commitment: "finalized", minContextSlot: row.processedSlot });
+              if (done) return 0;
+              if (!validSlot(validity?.context?.slot) || validity.value !== false) throw Error("Signed transaction blockhash has not expired.");
+              const currentValidity = await this.rpc.isBlockhashValid(blockhash, { commitment: "confirmed", minContextSlot: validity.context.slot });
+              if (done) return 0;
+              if (!validSlot(currentValidity?.context?.slot) || currentValidity.context.slot < validity.context.slot || currentValidity.value !== false) throw Error("Signed transaction blockhash is still usable.");
+              const [current] = await this.signatureStatuses([row.signature], currentValidity.context.slot);
               if (done) return 0;
               if (current) {
-                if (current.err && ["confirmed", "finalized"].includes(current.confirmationStatus ?? "")) { row.stage = "failed"; row.error = String(current.err); this.store.put(row); throw new FossaError("TRANSACTION_FAILED", `Fossa transaction failed: ${row.signature}.`); }
+                if (current.err && current.confirmationStatus === "finalized") { row.stage = "failed"; row.error = String(current.err); this.store.put(row); throw new FossaError("TRANSACTION_FAILED", `Fossa transaction failed: ${row.signature}.`); }
                 if (!wake && !current.err && (!confirmed || current.confirmationStatus === "confirmed" || current.confirmationStatus === "finalized")) return Number(current.slot);
                 continue;
               }
@@ -289,7 +322,7 @@ export class FossaClient {
         const status = statuses[index];
         if (!status || !["confirmed", "finalized"].includes(status.confirmationStatus ?? "")) continue;
         const row = batch[index]; row.scope = scope; row.processedSlot = Number(status.slot);
-        if (status.err) { row.stage = "failed"; row.error = String(status.err); }
+        if (status.err && status.confirmationStatus === "finalized") { row.stage = "failed"; row.error = String(status.err); }
         this.store.put(row);
       }
     }
@@ -511,7 +544,7 @@ export class FossaClient {
       if (!this.catalog?.ready || Date.now() - this.catalogAt > this.cfg.opencode.catalogMaxAgeMs) throw new FossaError("CATALOG_STALE", "Fossa catalog is synchronizing. No payment submitted.");
       let model = this.catalog.models.find(model => model.id === modelId);
       if (!model) throw new FossaError("MODEL_UNAVAILABLE", "Selected Fossa model is unavailable.");
-      const parsed = JSON.parse(body) as { messages: unknown[]; tools?: unknown[]; max_tokens?: number; max_completion_tokens?: number };
+      const parsed = JSON.parse(body) as { messages: unknown[]; tools?: unknown[]; response_format?: unknown; max_tokens?: number; max_completion_tokens?: number };
       const settings = this.settings(modelId), requirements = routingRequirements(model, settings);
       if (!requirements.checkpoint) throw new FossaError("NO_PROVIDER", "No provider matches this model’s published version.");
       if (Array.isArray(parsed.messages) && parsed.messages.some((message: any) => Array.isArray(message?.content) && message.content.some((part: any) => part?.type === "image_url"))) requirements.inputModalities |= 2;
@@ -690,11 +723,12 @@ export class FossaClient {
     row.cancelRequested = true; row.stage = "uncertain"; this.store.put(row);
     if (!row.cancelSent && row.provider && row.endpoint) {
       const body = '{"cancel":true}', headers = this.signedHeaders(row, digest(body));
-      const response = await fetch(row.endpoint.replace(/\/$/, "") + "/cancel", { method: "POST", headers, body, signal: AbortSignal.timeout(5000), redirect: "error" });
+      const response = await providerFetch(new Request(row.endpoint.replace(/\/$/, "") + "/cancel", { method: "POST", headers, body, signal: AbortSignal.timeout(5000), redirect: "error" }), this.account.apiUrl);
       if (response.ok || [404, 405].includes(response.status)) {
         const current = this.localRequest(id);
         if (current && !terminal.has(current.stage)) this.store.put({ ...current, cancelSent: true });
-      } else if (!bookingPending(response.status, providerError(await response.json().catch(() => null)))) throw new FossaError("CANCEL_PENDING", "Cancellation is waiting for booking recovery.");
+        void response.body?.cancel().catch(() => {});
+      } else if (!bookingPending(response.status, (await readProviderFailure(response, AbortSignal.timeout(5000))).error)) throw new FossaError("CANCEL_PENDING", "Cancellation is waiting for booking recovery.");
     }
     void this.recoverPending();
   }
@@ -770,7 +804,9 @@ export class FossaClient {
       },
       cancel: reason => { if (!completed) { failed = true; void this.cancel(row.id).catch(() => {}); } finish(); closeReader(reason); },
     });
-    return new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
+    const headers = new Headers(response.headers);
+    for (const name of ["content-length", "content-encoding", "transfer-encoding"]) headers.delete(name);
+    return new Response(body, { status: response.status, statusText: response.statusText, headers });
   }
   failed(id: string) { const row = this.localRequest(id); if (row && ["prepared", "sent", "matched", "inference"].includes(row.stage)) { row.stage = "uncertain"; this.store.put(row); void this.recoverPending(); } }
   stop() { this.stopped = true; clearTimeout(this.retry); clearInterval(this.timer); clearInterval(this.rakebackTimer); this.socket?.close(); for (const wake of this.catalogWaiters) wake(); this.wakeWallet(); }

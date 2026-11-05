@@ -4,6 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store, type Pending } from "../src/account/store";
 import { FossaClient } from "../src/inference/client";
+import { PublicKey, SystemProgram, Transaction, VersionedTransaction } from "@solana/web3.js";
+
+const blockhash = new PublicKey(new Uint8Array(32).fill(7)).toString();
+const expiryTransaction = () => Buffer.from(new VersionedTransaction(new Transaction({ feePayer: SystemProgram.programId, recentBlockhash: blockhash as never }).add(SystemProgram.transfer({ fromPubkey: SystemProgram.programId, toPubkey: SystemProgram.programId, lamports: 0n })).compileMessage()).serialize()).toString("base64");
 
 test("request timing lookup isolates wallet, session and flow and skips current request", () => {
   const directory = mkdtempSync(join(tmpdir(), "fossa-previous-")), store = new Store(directory);
@@ -87,7 +91,7 @@ test("legacy network adoption requires confirmed history and same-lane alternate
   client.cfg = { programId: "program", market: "market", usdcMint: "mint", opencode: { mainnetGenesisHash: "chain" } } as never;
   const row = { id: "old", wallet: "wallet", booking: "booking", generation: "1", stage: "uncertain", created: 1, scope: { program: "program", market: "market", lane: "lane" } } as Pending;
   let confirmationStatus = "processed";
-  client["rpc"] = { getSignatureStatuses: async () => ({ value: [{ err: null, slot: 20, confirmationStatus }] }) } as never;
+  client["rpc"] = { getSignatureStatuses: async () => ({ context: { slot: 20 }, value: [{ err: null, slot: 20, confirmationStatus }] }) } as never;
   try {
     store.put(row); await client["adoptLegacy"](); expect(() => client["assertJournalScope"]()).toThrow();
     confirmationStatus = "confirmed"; await client["adoptLegacy"](); expect(() => client["assertJournalScope"]()).not.toThrow();
@@ -101,11 +105,11 @@ test("expiry rechecks signature history after finalized height before releasing 
   const directory = mkdtempSync(join(tmpdir(), "fossa-expiry-")), store = new Store(directory);
   const client = new FossaClient(store, { wallet: "wallet" } as never, () => {});
   client.cfg = { opencode: { requestTimeoutMs: 1000, pollIntervalMs: 10 } } as never;
-  const row = { id: "expiry", wallet: "wallet", booking: "booking", generation: "1", stage: "sent", created: Date.now(), expiry: 100 } as Pending;
+  const row = { id: "expiry", wallet: "wallet", booking: "booking", generation: "1", stage: "sent", created: Date.now(), expiry: 100, transaction: expiryTransaction() } as Pending;
   const calls: string[] = []; let found = true;
-  client["rpc"] = { getSignatureStatuses: async () => { calls.push("status"); return { value: [calls.length > 2 && found ? { err: null, slot: 20, confirmationStatus: "confirmed" } : null] }; }, getBlockHeight: async (commitment: string) => { calls.push(commitment); return 200; } } as never;
+  client["rpc"] = { getSignatureStatuses: async () => { calls.push("status"); return { context: { slot: 30 }, value: [calls.length > 2 && found ? { err: null, slot: 20, confirmationStatus: "confirmed" } : null] }; }, getBlockHeight: async (commitment: string) => { calls.push(commitment); return 200; }, isBlockhashValid: async (hash: string, options: { commitment: string }) => { expect(hash).toBe(blockhash); calls.push(`blockhash:${options.commitment}`); return { context: { slot: 30 }, value: false }; } } as never;
   try {
-    store.put(row); expect(await client["processed"](row, undefined, undefined, true)).toBe(20); expect(calls).toEqual(["status", "finalized", "status"]); expect(store.request(row.id, row.wallet)?.stage).toBe("sent");
+    store.put(row); expect(await client["processed"](row, undefined, undefined, true)).toBe(20); expect(calls).toEqual(["status", "finalized", "blockhash:finalized", "blockhash:confirmed", "status"]); expect(store.request(row.id, row.wallet)?.stage).toBe("sent");
     calls.length = 0; found = false; await expect(client["processed"](row, undefined, undefined, true)).rejects.toThrow("expired"); expect(store.request(row.id, row.wallet)?.stage).toBe("expired");
   } finally { client.stop(); store.close(); rmSync(directory, { recursive: true, force: true }); }
 });
@@ -119,10 +123,54 @@ test("malformed signature history cannot expire or adopt an uncertain journal", 
     for (const [index, result] of invalid.entries()) {
       const row = { id: `invalid-${index}`, wallet: "wallet", booking: "booking", generation: "1", stage: "sent", created: Date.now(), expiry: 100, signature: "signature", scope: { program: "program", market: "market", lane: "lane" } } as Pending;
       let calls = 0;
-      client["rpc"] = { getSignatureStatuses: async () => ++calls === 1 ? { value: [null] } : result, getBlockHeight: async () => 200 } as never;
+      client["rpc"] = { getSignatureStatuses: async () => ++calls === 1 ? { context: { slot: 30 }, value: [null] } : { context: { slot: 30 }, ...result }, getBlockHeight: async () => 200 } as never;
       store.put(row); await expect(client["processed"](row, undefined, undefined, true)).rejects.toThrow("unresolved");
       expect(store.request(row.id, row.wallet)?.stage).toBe("uncertain"); expect(store.request(row.id, row.wallet)?.signature).toBe("signature");
       await expect(client["adoptLegacy"]()).rejects.toThrow("Invalid signature status"); expect(store.request(row.id, row.wallet)?.scope?.genesis).toBeUndefined();
     }
+  } finally { client.stop(); store.close(); rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("signature history enforces context freshness and rejects slots beyond its context", async () => {
+  const client = new FossaClient({} as Store, {} as never, () => {});
+  for (const contextSlot of [30, 30n]) for (const statusSlot of [20, 20n]) for (const floor of [30, 30n]) {
+    const status = { err: null, slot: statusSlot, confirmations: 1n, confirmationStatus: "confirmed" as const };
+    client["rpc"] = { getSignatureStatuses: async () => ({ context: { slot: contextSlot }, value: [status] }) } as never;
+    expect<unknown>(await client["signatureStatuses"](["signature"], floor)).toEqual([status]);
+    await expect(client["signatureStatuses"](["signature"], 31)).rejects.toThrow("Invalid signature status");
+  }
+  for (const context of [undefined, {}, { slot: -1 }, { slot: 0.5 }, { slot: "30" }, { slot: 9007199254740992n }]) {
+    client["rpc"] = { getSignatureStatuses: async () => ({ context, value: [null] }) } as never;
+    await expect(client["signatureStatuses"](["signature"])).rejects.toThrow("Invalid signature status");
+  }
+  for (const slot of [31, 31n]) {
+    client["rpc"] = { getSignatureStatuses: async () => ({ context: { slot: 30n }, value: [{ err: null, slot, confirmationStatus: "finalized" }] }) } as never;
+    await expect(client["signatureStatuses"](["signature"])).rejects.toThrow("Invalid signature status");
+  }
+});
+
+test("expiry rejects stale null history without flooring finalized proof to fresh processed context", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "fossa-expiry-context-")), store = new Store(directory);
+  const client = new FossaClient(store, { wallet: "wallet" } as never, () => {});
+  client.cfg = { opencode: { requestTimeoutMs: 25, pollIntervalMs: 4 } } as never;
+  const row = { id: "expiry-context", wallet: "wallet", booking: "booking", generation: "1", signature: "signature", transaction: expiryTransaction(), stage: "sent", created: Date.now(), expiry: 100, processedSlot: 10 } as Pending;
+  let calls = 0, historySlot: number | bigint = 39;
+  client["rpc"] = {
+    getSignatureStatuses: async () => ({ context: { slot: ++calls % 2 ? 100n : historySlot }, value: [null] }),
+    getBlockHeight: async () => 200n,
+    isBlockhashValid: async (hash: string, options: { commitment: string; minContextSlot: number | bigint }) => {
+      expect(hash).toBe(blockhash);
+      expect(options.minContextSlot).toBe(options.commitment === "finalized" ? 10 : 30n);
+      return { context: { slot: options.commitment === "finalized" ? 30n : 40 }, value: false };
+    },
+  } as never;
+  try {
+    store.put(row);
+    await expect(client["processed"](row, undefined, undefined, true)).rejects.toThrow("unresolved");
+    expect(store.request(row.id, row.wallet)?.stage).toBe("uncertain");
+    expect(store.request(row.id, row.wallet)?.transaction).toBe(row.transaction);
+    calls = 0; historySlot = 40n;
+    await expect(client["processed"](row, undefined, undefined, true)).rejects.toThrow("expired");
+    expect(store.request(row.id, row.wallet)?.stage).toBe("expired");
   } finally { client.stop(); store.close(); rmSync(directory, { recursive: true, force: true }); }
 });

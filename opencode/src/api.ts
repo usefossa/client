@@ -22,7 +22,7 @@ export async function api<T>(base: string, path: string, options: { token?: stri
     if (error instanceof Error && error.name === "TimeoutError") throw new FossaError("FOSSA_TIMEOUT", "Fossa backend took too long to respond. Check the server or your connection.");
     throw new FossaError("FOSSA_OFFLINE", `Cannot reach Fossa at ${new URL(base).origin}. Check your connection and API endpoint.`);
   }
-  const value = await response.json().catch(() => null);
+  const value = await readJson(response);
   if (!response.ok) throw new FossaError(response.status === 401 ? "AUTH_EXPIRED" : "FOSSA_API", providerError(value, `Fossa API returned ${response.status}.`).message);
   return value as T;
 }
@@ -33,5 +33,22 @@ export async function config(base: string, signal?: AbortSignal) {
 }
 export async function refreshAccount(account: Account) {
   const value = await api<Pick<Account, "access" | "refresh" | "expires">>(account.apiUrl, "/opencode/refresh", { method: "POST", token: account.refresh });
-  return { ...account, ...value };
+  if (!value || typeof value.access !== "string" || !value.access || typeof value.refresh !== "string" || !value.refresh || !Number.isSafeInteger(value.expires) || value.expires <= 0) throw new FossaError("AUTH_INVALID", "Fossa returned invalid refreshed credentials.");
+  return { ...account, access: value.access, refresh: value.refresh, expires: value.expires };
+}
+
+export async function readJson(response: Response, limit = 32 * 1024 * 1024): Promise<unknown> {
+  const reader = response.body?.getReader(), chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    if (Number(response.headers.get("content-length")) > limit) throw new FossaError("RESPONSE_TOO_LARGE", "Fossa API response exceeds the byte limit.");
+    while (reader) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > limit) throw new FossaError("RESPONSE_TOO_LARGE", "Fossa API response exceeds the byte limit.");
+      chunks.push(value);
+    }
+    try { return JSON.parse(Buffer.concat(chunks).toString()); } catch { return null; }
+  } finally { void reader?.cancel().catch(() => {}); reader?.releaseLock(); }
 }

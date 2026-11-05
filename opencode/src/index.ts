@@ -1,5 +1,6 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { bookingPending, readProviderFailure } from "./inference/provider-response";
+import { providerFetch } from "./inference/provider-fetch";
 import { Credential, Integration, Model, Plugin, Provider } from "@opencode/plugin";
 import type { RpcCallContext } from "@opencode/plugin/promise/rpc";
 import { generate } from "random-words";
@@ -109,7 +110,7 @@ export default Plugin.define({
             const dispatchedAt = Date.now();
             if (!attempt) value.dispatched(call, dispatchedAt);
             const headers = new AbortController(), timeout = setTimeout(() => headers.abort(new Error("Provider response headers timed out.")), 60_000);
-            try { response = await fetch(new Request(outbound.clone(), { signal: AbortSignal.any([outbound.signal, headers.signal]) })); }
+            try { response = await providerFetch(new Request(outbound.clone(), { signal: AbortSignal.any([outbound.signal, headers.signal]) }), apiUrl); }
             finally { clearTimeout(timeout); }
             if (response.ok) break;
             const failure = await readProviderFailure(response, outbound.signal);
