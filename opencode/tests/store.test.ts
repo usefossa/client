@@ -139,7 +139,7 @@ test("automatic encryption survives restart and optional protection preserves al
   let store = new Store(directory);
   await store.save(account, secrets);
   expect(store.security(account.walletId)).toEqual({ protected: false, unlocked: true });
-  expect(statSync(join(directory, "device.key")).mode & 0o777).toBe(0o600);
+  if (process.platform !== "win32") expect(statSync(join(directory, "device.key")).mode & 0o777).toBe(0o600);
   store.close(); store = new Store(directory); await store.autoUnlock(account.walletId);
   expect(store.secrets(account.walletId)).toEqual(secrets);
   await expect(store.protect(account, "ab")).rejects.toThrow("3 characters");
