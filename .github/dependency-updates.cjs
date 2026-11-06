@@ -2,7 +2,8 @@ module.exports = async function maintain({ github, context, core, workflow = "",
   const repo = context.repo;
   const pulls = await github.paginate(github.rest.pulls.list, { ...repo, state: "open", base: "main" });
   for (const pull of pulls) {
-    if (pull.user.login !== "dependabot[bot]" || pull.head.repo?.full_name !== `${repo.owner}/${repo.repo}` || !pull.head.ref.startsWith("dependabot/") || !pull.labels.some(label => label.name === "security")) continue;
+    const trusted = pull.user.login === "dependabot[bot]" && pull.head.ref.startsWith("dependabot/") || pull.user.id === 41898282 && pull.head.ref === "security/bun-audit";
+    if (!trusted || pull.head.repo?.full_name !== `${repo.owner}/${repo.repo}` || !pull.labels.some(label => label.name === "security")) continue;
     const request = { ...repo, pull_number: pull.number };
     const [files, checks, status, reviews] = await Promise.all([
       github.paginate(github.rest.pulls.listFiles, request),

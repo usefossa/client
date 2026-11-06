@@ -5,7 +5,7 @@ import maintain from "./dependency-updates.cjs";
 function fixture(options = {}) {
   const state = { actor: "dependabot[bot]", source: "usefossa/backend", security: true, file: "Cargo.lock", ci: "success", status: "success", head: "abc", reviewed: true, reviewHead: "abc", reviewState: "COMMENTED", ...options };
   const calls = [];
-  const pull = { number: 1, labels: state.security ? [{ name: "security" }] : [], user: { login: state.actor }, head: { repo: { full_name: state.source }, ref: "dependabot/security", sha: "abc" } };
+  const pull = { number: 1, labels: state.security ? [{ name: "security" }] : [], user: { login: state.actor, id: state.actorId }, head: { repo: { full_name: state.source }, ref: state.branch || "dependabot/security", sha: "abc" } };
   const github = {
     paginate: async route => ({ pulls: [pull], files: [{ filename: state.file }], checks: [{ name: "ci", app: { id: 15368 }, status: "completed", conclusion: state.ci }], reviews: state.reviewed ? [{ user: { id: 175728472, login: "Copilot" }, commit_id: state.reviewHead, state: state.reviewState }] : [] })[route],
     rest: {
@@ -42,4 +42,12 @@ test("public repository updates never trigger package publishing", async () => {
   input.workflow = "";
   assert.equal(await maintain(input), 1);
   assert.equal(calls.length, 1);
+});
+
+test("only the native security bot on its exact branch can merge bun fixes", async () => {
+  for (const [actorId, branch, expected] of [[41898282, "security/bun-audit", 1], [1, "security/bun-audit", undefined], [41898282, "feature/other", undefined]]) {
+    const { calls, input } = fixture({ actor: "github-actions[bot]", actorId, branch, file: "bun.lock" });
+    assert.equal(await maintain(input), expected);
+    assert.equal(calls.length, expected ? 2 : 0);
+  }
 });
