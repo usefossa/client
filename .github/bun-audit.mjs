@@ -14,5 +14,5 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1
   if (run.error || run.signal) throw run.error || new Error("security audit interrupted");
   const result = auditResult(run.stdout, run.status);
   console.log(`fixed ${result.fixed} advisories; ${result.remaining} remain for review`);
-  if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `changed=${result.changed}\n`);
+  if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `changed=${result.changed}\nremaining=${result.remaining}\n`);
 }
