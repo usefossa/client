@@ -27,4 +27,4 @@ jobs:
         with:
           script: |
             const maintain = require('./.github/dependency-updates.cjs');
-            await maintain({ github, context, core, workflow: '' });
+            await maintain({ github, context, core, workflow: 'inventory.yml' });
