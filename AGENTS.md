@@ -6,6 +6,7 @@ client integrations live in their own directories. `opencode/` contains the Open
 
 ## workflow
 
+- dependency updates and security fixes are manual; retain vulnerability alerts and dependency inventories.
 - read the relevant implementation before editing. clarify uncertain requirements and keep changes focused.
 - deployments and package publication require an explicit request. repository maintenance does not authorize signing, broadcasting, or fund movement.
 - preserve unrelated configuration, wallet data, credentials, and pending transaction journals.
