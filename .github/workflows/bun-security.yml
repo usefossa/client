@@ -35,7 +35,7 @@ jobs:
           base: main
           title: '[fix] vulnerable bun dependencies'
           commit-message: '[fix] vulnerable bun dependencies'
-          body: 'Native Bun audit fixes compatible vulnerable dependencies only; required CI and Copilot review gate merging, while remaining advisories and incompatible upgrades stay available for review.'
+          body: 'Native Bun audit fixes compatible vulnerable dependencies only; successful security checks gate merging, while remaining advisories and incompatible upgrades stay available for review.'
           labels: security
           add-paths: |
             opencode/package.json
