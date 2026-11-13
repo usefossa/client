@@ -2,6 +2,7 @@ import type { BoxRenderable, ScrollBoxRenderable, TextRenderable, Renderable } f
 import type { Context } from "@opencode/plugin/tui/context";
 import { createEffect, createRoot, untrack } from "opentui:runtime-module:solid-js";
 import { createModelSource, type ModelSource } from "./model-source";
+import { createModelOrder } from "./model-order";
 import { openProvider } from "./provider-row";
 import { isText, textOf, visibleNodes } from "./render-tree";
 import type { ModelDetails } from "../types";
@@ -25,7 +26,9 @@ type Row = { box: BoxRenderable; dot: TextRenderable; name: TextRenderable; deta
 export function installModelPicker(context: Context, suppliedSource?: ModelSource) {
   const picker = createRoot(disposeRoot => {
     const source = suppliedSource ?? createModelSource(context), renderer = context.renderer;
-    const [appearance, saveAppearance] = context.storage.store("appearance", { initial: { modelPane: true } });
+    const [appearance, saveAppearance] = context.storage.store("appearance", { initial: { modelPane: true, fossaFirst: true } });
+    const order = createModelOrder(context, () => appearance.fossaFirst !== false);
+    const toggleOrder = async () => { await saveAppearance(draft => { draft.fossaFirst = appearance.fossaFirst === false; }); order.reset(); renderer.requestRender(); };
     let pendingEnabled: boolean | undefined, toggleRevision = 0, saving = Promise.resolve();
     const enabled = () => pendingEnabled ?? appearance.modelPane !== false;
     const toggle = async () => {
@@ -44,7 +47,7 @@ export function installModelPicker(context: Context, suppliedSource?: ModelSourc
     let host: Renderable | undefined, left: Renderable["left"], top: Renderable["top"], frame: BoxRenderable | undefined;
     let title: TextRenderable | undefined, heading: TextRenderable | undefined, message: TextRenderable | undefined, panel: ScrollBoxRenderable | undefined;
     let footer: BoxRenderable | undefined, shortcut: TextRenderable | undefined, selected = "", sample: TextRenderable | undefined;
-    let latest: ModelDetails | undefined, failure: string | undefined, unwatch: (() => void) | undefined, stopped = false;
+    let latest: ModelDetails | undefined, failure: string | undefined, unwatch: (() => void) | undefined, stopped = false, opened = false;
     let palette: unknown[] = [], rows: Row[] = [], painted: ModelDetails | undefined, paintedError: string | undefined;
     // native layout skips undefined positions; auto clears the previous offset.
     const restore = () => {
@@ -128,9 +131,15 @@ export function installModelPicker(context: Context, suppliedSource?: ModelSourc
     };
     const scan = async () => {
       if (stopped) return;
-      if (!active() || !enabled()) { if (frame) clear(); if (!active()) { selector = scroll = category = undefined; } return; }
+      if (!active()) { order.reset(); opened = false; if (frame) clear(); selector = scroll = category = undefined; return; }
+      if (!opened) {
+        opened = true;
+        void Promise.all([context.data.location.model.sync(context.location), context.data.location.provider.sync(context.location)]).catch(() => {});
+      }
       const list = discover();
-      if (!list || !selector) { if (frame) clear(); return; }
+      if (!list || !selector) { order.reset(); if (frame) clear(); return; }
+      order.scan(selector, list, categories());
+      if (!enabled()) { if (frame) clear(); return; }
       const theme = context.theme.surface("dialog");
       let chosen: { model: string; sample: TextRenderable } | undefined;
       for (const node of visibleNodes(list)) {
@@ -168,11 +177,12 @@ export function installModelPicker(context: Context, suppliedSource?: ModelSourc
     };
     createEffect(() => { if (appearance.modelPane === false && pendingEnabled === undefined) clear(); renderer.requestRender(); });
     renderer.setFrameCallback(scan);
-    const dispose = () => { stopped = true; renderer.removeFrameCallback(scan); clear(); disposeRoot(); if (!suppliedSource) source.dispose(); };
-    return Object.assign(dispose, { enabled, toggle, active });
+    const dispose = () => { stopped = true; renderer.removeFrameCallback(scan); order.reset(); clear(); disposeRoot(); if (!suppliedSource) source.dispose(); };
+    return Object.assign(dispose, { enabled, toggle, active, orderEnabled: () => appearance.fossaFirst !== false, toggleOrder, orderCommands: () => order.commands() });
   });
   // register from the caller so the host can attach its keymap provider when setup has no owner.
   const binding = untrack(() => freeBinding(context));
   context.keymap.layer(() => ({ mode: "global", commands: [{ id: commandId, title: "Toggle Fossa model pane", group: "Fossa", palette: true, bind: binding, run: () => { void picker.toggle().catch(error => context.ui.toast.show({ title: "Fossa", message: String(error), variant: "error" })); } }] }));
+  context.keymap.layer(() => ({ mode: "modal", priority: 1, enabled: () => picker.active() && picker.orderEnabled(), commands: picker.orderCommands() }));
   return picker;
 }

@@ -36,20 +36,21 @@ for (const wrappers of [0, 3]) test(`native provider pane matches selector, rece
     { ...model, id: "fixture/uc", name: "Fixture model UC", offers: [model.offers[1]] },
   ].map(item => ({ ...item, providerID: "fossa" }));
   const preference = { modelPane: true };
-  let queries = 0, requested = "", scan!: (deltaTime: number) => Promise<void>, command!: { id: string; bind: string | false; run: () => void };
+  let queries = 0, syncs = 0, pickerActive = true, requested = "", scan!: (deltaTime: number) => Promise<void>, command!: { id: string; bind: string | false; run: () => void };
   const setFrameCallback = t.renderer.setFrameCallback.bind(t.renderer);
   t.renderer.setFrameCallback = callback => { scan = callback; setFrameCallback(callback); };
   const context = {
     renderer: t.renderer, client: { rpc: () => ({ model: async ({ model: id }: { model: string }) => { queries++; requested = id; return structuredClone(models.find(item => item.id === id)!); } }) },
     storage: { store: () => [preference, async (update: (draft: typeof preference) => void) => { await Promise.resolve(); update(preference); }] },
-    keymap: { commands: () => [{ id: "model.dialog.favorite" }, { id: "occupied" }], shortcuts: (id: string) => id === "occupied" ? ["ctrl+g"] : id === command?.id && command.bind ? [command.bind] : [], layer: (factory: () => { commands: typeof command[] }) => { expect(getOwner()).toBe(owner); command = factory().commands[0]; } },
-    data: { location: { model: { list: () => models }, provider: { list: () => [{ name: "Fossa" }] } } },
+    keymap: { commands: () => [...pickerActive ? [{ id: "model.dialog.favorite" }] : [], { id: "occupied" }], shortcuts: (id: string) => id === "occupied" ? ["ctrl+g"] : id === command?.id && command.bind ? [command.bind] : [], layer: (factory: () => { commands: typeof command[] }) => { expect(getOwner()).toBe(owner); const next = factory().commands.find(command => command.id === "fossa.model-pane.toggle"); if (next) command = next; } },
+    data: { location: { model: { list: () => models, sync: async () => { syncs++; } }, provider: { list: () => [{ name: "Fossa" }], sync: async () => {} } } },
     theme: { text: { base: text, muted }, surface: () => ({ background: { base, action: { primary: { focused } } }, hue: { accent: { 200: accent }, interactive: { 200: blue } } }) },
   } as unknown as Context;
   let stop = installModelPicker(context);
   const render = async () => { for (let index = 0; index < 4; index++) await t.renderOnce(); };
   try {
     await render();
+    expect(syncs).toBe(1); expect(stop.orderEnabled()).toBe(true);
     expect(requested).toBe(model.id);
     let frame = find(t.renderer.root, "fossa-picker-frame")!;
     expect(frame).toBeDefined(); expect(frame.parent).toBe(overlay);
@@ -111,5 +112,9 @@ for (const wrappers of [0, 3]) test(`native provider pane matches selector, rece
     expect(shell.left).toBe(originalLeft ?? "auto"); expect(shell.top).toBe(originalTop ?? "auto");
     await stop.toggle(); stop(); stop = installModelPicker(context);
     expect(stop.enabled()).toBe(false);
+    await render(); expect(syncs).toBe(2);
+    pickerActive = false; await render(); pickerActive = true; await render(); expect(syncs).toBe(3);
+    await stop.toggleOrder(); expect(stop.orderEnabled()).toBe(false);
+    stop(); stop = installModelPicker(context); expect(stop.orderEnabled()).toBe(false);
   } finally { stop(); await t.dispose(); }
 });
