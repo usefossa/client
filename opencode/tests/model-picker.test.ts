@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { BoxRenderable, RGBA, ScrollBoxRenderable, TextRenderable, type Renderable } from "@opentui/core";
 import { createTestRenderer } from "@opentui/core/testing";
-import type { Context } from "@opencode/plugin/tui/context";
+import type { Context, KeymapLayer } from "@opencode/plugin/tui/context";
 import { installModelPicker } from "../src/ui/model-picker";
 import type { ModelDetails } from "../src/types";
 import { getOwner } from "solid-js";
@@ -36,13 +36,28 @@ for (const wrappers of [0, 3]) test(`native provider pane matches selector, rece
     { ...model, id: "fixture/uc", name: "Fixture model UC", offers: [model.offers[1]] },
   ].map(item => ({ ...item, providerID: "fossa" }));
   const preference = { modelPane: true };
+  const layers: KeymapLayer[] = [];
+  let registering = false, resolvingEnabled = false;
+  const layerEnabled = (layer: KeymapLayer) => {
+    resolvingEnabled = true;
+    try { return typeof layer.enabled === "function" ? layer.enabled() : layer.enabled !== false; }
+    finally { resolvingEnabled = false; }
+  };
   let queries = 0, syncs = 0, pickerActive = true, requested = "", scan!: (deltaTime: number) => Promise<void>, command!: { id: string; bind: string | false; run: () => void };
   const setFrameCallback = t.renderer.setFrameCallback.bind(t.renderer);
   t.renderer.setFrameCallback = callback => { scan = callback; setFrameCallback(callback); };
   const context = {
     renderer: t.renderer, client: { rpc: () => ({ model: async ({ model: id }: { model: string }) => { queries++; requested = id; return structuredClone(models.find(item => item.id === id)!); } }) },
     storage: { store: () => [preference, async (update: (draft: typeof preference) => void) => { await Promise.resolve(); update(preference); }] },
-    keymap: { commands: () => [...pickerActive ? [{ id: "model.dialog.favorite" }] : [], { id: "occupied" }], shortcuts: (id: string) => id === "occupied" ? ["ctrl+g"] : id === command?.id && command.bind ? [command.bind] : [], layer: (factory: () => { commands: typeof command[] }) => { expect(getOwner()).toBe(owner); const next = factory().commands.find(command => command.id === "fossa.model-pane.toggle"); if (next) command = next; } },
+    keymap: {
+      commands: () => { if (resolvingEnabled) throw Error("active commands cannot resolve their own layer eligibility"); return [...pickerActive ? [{ id: "model.dialog.favorite" }] : [], { id: "occupied" }]; },
+      shortcuts: (id: string) => { if (registering) throw Error("reactive layer factory cannot depend on its own shortcut registry"); return id === "occupied" ? ["ctrl+g"] : id === command?.id && command.bind ? [command.bind] : []; },
+      layer: (factory: () => KeymapLayer) => {
+        expect(getOwner()).toBe(owner); registering = true;
+        try { const layer = factory(); layers.push(layer); const next = layer.commands?.find(command => command.id === "fossa.model-pane.toggle"); if (next) command = next as typeof command; }
+        finally { registering = false; }
+      },
+    },
     data: { location: { model: { list: () => models, sync: async () => { syncs++; } }, provider: { list: () => [{ name: "Fossa" }], sync: async () => {} } } },
     theme: { text: { base: text, muted }, surface: () => ({ background: { base, action: { primary: { focused } } }, hue: { accent: { 200: accent }, interactive: { 200: blue } } }) },
   } as unknown as Context;
@@ -50,6 +65,7 @@ for (const wrappers of [0, 3]) test(`native provider pane matches selector, rece
   const render = async () => { for (let index = 0; index < 4; index++) await t.renderOnce(); };
   try {
     await render();
+    expect(layerEnabled(layers.find(layer => layer.mode === "modal")!)).toBe(true);
     expect(syncs).toBe(1); expect(stop.orderEnabled()).toBe(true);
     expect(requested).toBe(model.id);
     let frame = find(t.renderer.root, "fossa-picker-frame")!;
@@ -113,7 +129,8 @@ for (const wrappers of [0, 3]) test(`native provider pane matches selector, rece
     await stop.toggle(); stop(); stop = installModelPicker(context);
     expect(stop.enabled()).toBe(false);
     await render(); expect(syncs).toBe(2);
-    pickerActive = false; await render(); pickerActive = true; await render(); expect(syncs).toBe(3);
+    pickerActive = false; await render(); expect(layerEnabled(layers.findLast(layer => layer.mode === "modal")!)).toBe(false);
+    pickerActive = true; await render(); expect(syncs).toBe(3);
     await stop.toggleOrder(); expect(stop.orderEnabled()).toBe(false);
     stop(); stop = installModelPicker(context); expect(stop.orderEnabled()).toBe(false);
   } finally { stop(); await t.dispose(); }

@@ -1,6 +1,6 @@
 import type { BoxRenderable, ScrollBoxRenderable, TextRenderable, Renderable } from "@opentui/core";
 import type { Context } from "@opencode/plugin/tui/context";
-import { createEffect, createRoot, untrack } from "opentui:runtime-module:solid-js";
+import { createEffect, createRoot, createSignal, untrack } from "opentui:runtime-module:solid-js";
 import { createModelSource, type ModelSource } from "./model-source";
 import { createModelOrder } from "./model-order";
 import { openProvider } from "./provider-row";
@@ -28,6 +28,7 @@ export function installModelPicker(context: Context, suppliedSource?: ModelSourc
     const source = suppliedSource ?? createModelSource(context), renderer = context.renderer;
     const [appearance, saveAppearance] = context.storage.store("appearance", { initial: { modelPane: true, fossaFirst: true } });
     const order = createModelOrder(context, () => appearance.fossaFirst !== false);
+    const [pickerOpen, setPickerOpen] = createSignal(false);
     const toggleOrder = async () => { await saveAppearance(draft => { draft.fossaFirst = appearance.fossaFirst === false; }); order.reset(); renderer.requestRender(); };
     let pendingEnabled: boolean | undefined, toggleRevision = 0, saving = Promise.resolve();
     const enabled = () => pendingEnabled ?? appearance.modelPane !== false;
@@ -131,7 +132,8 @@ export function installModelPicker(context: Context, suppliedSource?: ModelSourc
     };
     const scan = async () => {
       if (stopped) return;
-      if (!active()) { order.reset(); opened = false; if (frame) clear(); selector = scroll = category = undefined; return; }
+      const isActive = active(); setPickerOpen(isActive);
+      if (!isActive) { order.reset(); opened = false; if (frame) clear(); selector = scroll = category = undefined; return; }
       if (!opened) {
         opened = true;
         void Promise.all([context.data.location.model.sync(context.location), context.data.location.provider.sync(context.location)]).catch(() => {});
@@ -178,11 +180,12 @@ export function installModelPicker(context: Context, suppliedSource?: ModelSourc
     createEffect(() => { if (appearance.modelPane === false && pendingEnabled === undefined) clear(); renderer.requestRender(); });
     renderer.setFrameCallback(scan);
     const dispose = () => { stopped = true; renderer.removeFrameCallback(scan); order.reset(); clear(); disposeRoot(); if (!suppliedSource) source.dispose(); };
-    return Object.assign(dispose, { enabled, toggle, active, orderEnabled: () => appearance.fossaFirst !== false, toggleOrder, orderCommands: () => order.commands() });
+    return Object.assign(dispose, { enabled, toggle, active, orderActive: () => pickerOpen() && appearance.fossaFirst !== false, orderEnabled: () => appearance.fossaFirst !== false, toggleOrder, orderCommands: () => order.commands() });
   });
   // register from the caller so the host can attach its keymap provider when setup has no owner.
   const binding = untrack(() => freeBinding(context));
   context.keymap.layer(() => ({ mode: "global", commands: [{ id: commandId, title: "Toggle Fossa model pane", group: "Fossa", palette: true, bind: binding, run: () => { void picker.toggle().catch(error => context.ui.toast.show({ title: "Fossa", message: String(error), variant: "error" })); } }] }));
-  context.keymap.layer(() => ({ mode: "modal", priority: 1, enabled: () => picker.active() && picker.orderEnabled(), commands: picker.orderCommands() }));
+  const commands = untrack(() => picker.orderCommands());
+  context.keymap.layer(() => ({ mode: "modal", priority: 1, enabled: picker.orderActive, commands }));
   return picker;
 }
