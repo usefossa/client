@@ -318,6 +318,7 @@ export default Plugin.define({
         { title: "Data retention", value: "retention", category: "Routing", footer: settings ? settings.zdrOnly ? "Zero data retention only" : "Off" : "—", loading: !settings && modelLoading },
         { title: "API endpoint", value: "endpoint", category: "Routing" },
         { title: "Model pane", value: "model-pane", category: "Appearance", footer: stopModels.enabled() ? "On" : "Off" },
+        { title: "Fossa models first", value: "model-order", category: "Appearance", footer: stopModels.orderEnabled() ? "On" : "Off" },
       ] });
       const selection = dialog.select(page()), update = () => { if (!closed && !stopped) dialog.update("Fossa Settings", page()); };
       void currentModel().then(model => { settings = model.settings; }, () => { settings = undefined; }).finally(() => { modelLoading = false; update(); });
@@ -349,6 +350,10 @@ export default Plugin.define({
             else if (value === "model-pane") {
               const value = await dialog.select({ title: "Model pane", current: stopModels.enabled() ? "on" : "off", options: [{ title: "On", value: "on" }, { title: "Off", value: "off" }] });
               if (value && (value === "on") !== stopModels.enabled()) await stopModels.toggle();
+            }
+            else if (value === "model-order") {
+              const value = await dialog.select({ title: "Fossa models first", description: "Show Fossa after Favorites and Recent in the model picker.", current: stopModels.orderEnabled() ? "on" : "off", options: [{ title: "On", value: "on" }, { title: "Off", value: "off" }] });
+              if (value && (value === "on") !== stopModels.orderEnabled()) await stopModels.toggleOrder();
             }
             else if (value === "wallets") {
               const result = await rpc.wallets({}) as { wallets: { id: string; name: string; address: string }[] };
