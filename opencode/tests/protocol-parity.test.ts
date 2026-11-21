@@ -13,5 +13,5 @@ test.skipIf(!process.env.FOSSA_PROVIDER_ROOT)("rust and client share request and
     catch (error) { actual = { error: (error as Error).message }; }
     expect(actual).toEqual(input.expected);
   }
-  for (const input of await Bun.file(join(root, "tests/fixtures/input-bounds.json")).json()) expect(inputBound(JSON.parse(input.raw), 1048576)).toBe(input.expected);
+  for (const input of await Bun.file(join(root, "tests/fixtures/input-bounds.json")).json()) expect(inputBound(JSON.parse(input.raw))).toBe(input.expected);
 });

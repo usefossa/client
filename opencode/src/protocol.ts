@@ -1,11 +1,44 @@
 type Message = { role?: unknown; content?: unknown; tool_calls?: unknown; tool_call_id?: unknown; name?: unknown; reasoning_content?: unknown; refusal?: unknown };
 const fields = new Set(["model", "messages", "max_tokens", "max_completion_tokens", "stream", "reasoning_effort", "tools", "tool_choice", "parallel_tool_calls", "temperature", "top_p", "frequency_penalty", "presence_penalty", "seed", "stop", "response_format", "stream_options", "store", "n", "logprobs"]);
 
-export function inputBound(body: { messages: unknown; tools?: unknown; response_format?: unknown }, contextTokens?: number) {
-  // reserve full context for image requests without a verified vision tokenizer.
-  if (contextTokens && Array.isArray(body.messages) && body.messages.some(message => Array.isArray(message?.content) && message.content.some((part: any) => part?.type === "image_url"))) return contextTokens;
+function imagePixels(url: unknown) {
+  if (typeof url !== "string") throw Error("Image dimensions unavailable");
+  const match = /^data:image\/(png|jpeg|webp|gif);base64,/.exec(url);
+  if (!match) throw Error("Image dimensions unavailable");
+  const bytes = Buffer.from(url.slice(match[0].length), "base64"), kind = match[1];
+  if (bytes.toString("base64") !== url.slice(match[0].length)) throw Error("Image dimensions unavailable");
+  let width = 0, height = 0;
+  if (kind === "png" && bytes.length >= 24 && bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])) && bytes.toString("ascii", 12, 16) === "IHDR") {
+    width = bytes.readUInt32BE(16); height = bytes.readUInt32BE(20);
+  } else if (kind === "gif" && bytes.length >= 10 && /^GIF8[79]a$/.test(bytes.toString("ascii", 0, 6))) {
+    width = bytes.readUInt16LE(6); height = bytes.readUInt16LE(8);
+  } else if (kind === "webp" && bytes.length >= 30 && bytes.toString("ascii", 0, 4) === "RIFF" && bytes.toString("ascii", 8, 12) === "WEBP") {
+    const format = bytes.toString("ascii", 12, 16);
+    if (format === "VP8X") { width = 1 + bytes.readUIntLE(24, 3); height = 1 + bytes.readUIntLE(27, 3); }
+    else if (format === "VP8L" && bytes[20] === 47) { width = 1 + (bytes[21] | (bytes[22] & 63) << 8); height = 1 + (bytes[22] >> 6 | bytes[23] << 2 | (bytes[24] & 15) << 10); }
+    else if (format === "VP8 " && bytes[23] === 157 && bytes[24] === 1 && bytes[25] === 42) { width = bytes.readUInt16LE(26) & 16383; height = bytes.readUInt16LE(28) & 16383; }
+  } else if (kind === "jpeg" && bytes.length >= 4 && bytes[0] === 255 && bytes[1] === 216) {
+    for (let at = 2; at + 8 < bytes.length;) {
+      if (bytes[at++] !== 255) break;
+      while (bytes[at] === 255) at++;
+      const marker = bytes[at++];
+      if (marker === 217 || marker === 218) break;
+      if (marker === 1 || marker >= 208 && marker <= 215) continue;
+      if (at + 2 > bytes.length) break;
+      const size = bytes.readUInt16BE(at);
+      if (size < 2 || at + size > bytes.length) break;
+      if ([192, 193, 194, 195, 197, 198, 199, 201, 202, 203, 205, 206, 207].includes(marker) && size >= 7) { height = bytes.readUInt16BE(at + 3); width = bytes.readUInt16BE(at + 5); break; }
+      at += size;
+    }
+  }
+  if (!width || !height || !Number.isSafeInteger(width * height * 2)) throw Error("Image dimensions unavailable");
+  return width * height * 2;
+}
+
+export function inputBound(body: { messages: unknown; tools?: unknown; response_format?: unknown }) {
   const bytes = Buffer.byteLength(JSON.stringify(body.messages)) + (body.tools ? Buffer.byteLength(JSON.stringify(body.tools)) + 32 : 0) + (body.response_format != null ? Buffer.byteLength(JSON.stringify(body.response_format)) + 32 : 0) + 512;
-  return bytes;
+  const pixels = Array.isArray(body.messages) ? body.messages.reduce((total, message: any) => total + (Array.isArray(message?.content) ? message.content.reduce((sum: number, part: any) => sum + (part?.type === "image_url" ? imagePixels(part.image_url?.url) : 0), 0) : 0), 0) : 0;
+  return bytes + pixels;
 }
 export function validateBody(value: unknown, booking: { maxInput: number; maxOutput: number; claimEnd: number }, config: { model: string; speed_tps: number; context_tokens: number; max_input_bound?: number; output_tokens: number; tools: boolean; input?: string[]; effort?: string[] }) {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw Error("Invalid request body");
@@ -53,8 +86,9 @@ export function validateBody(value: unknown, booking: { maxInput: number; maxOut
   if (body.stream_options != null && (body.stream !== true || typeof body.stream_options !== "object" || Array.isArray(body.stream_options) || Object.keys(body.stream_options).some(key => !["include_usage", "include_obfuscation"].includes(key) || typeof body.stream_options[key] !== "boolean"))) throw Error("Invalid stream options");
   const max = body.max_tokens ?? body.max_completion_tokens ?? Math.min(booking.maxOutput, config.output_tokens);
   if (!Number.isSafeInteger(max) || max < 1 || max > booking.maxOutput || max > config.output_tokens || body.max_tokens != null && body.max_completion_tokens != null) throw Error("Output limit exceeded");
-  if (inputBound(body as { messages: unknown }, config.context_tokens) > booking.maxInput || booking.maxInput > (config.max_input_bound ?? config.context_tokens)) throw Error("Input limit exceeded");
-  if (inputBound(body as { messages: unknown; tools?: unknown; response_format?: unknown }, config.context_tokens) + max > config.context_tokens) throw Error("Context limit exceeded");
+  const input = inputBound(body as { messages: unknown; tools?: unknown; response_format?: unknown });
+  if (input > booking.maxInput || booking.maxInput > (config.max_input_bound ?? config.context_tokens)) throw Error("Input limit exceeded");
+  if (input + max > config.context_tokens) throw Error("Context limit exceeded");
   if (Date.now() / 1000 + Math.ceil(max / Math.max(1, config.speed_tps)) + 5 >= booking.claimEnd) throw Error("Booking deadline too short");
   return max;
 }

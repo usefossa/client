@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import { validateBody, inputBound } from "../src/protocol";
 import { make } from "@opencode/ai/promise";
 import { configure } from "@opencode/ai/providers/openai-compatible";
@@ -14,6 +15,15 @@ test("website text requests retain their existing token bound", () => {
   const body = { model: config.model, messages: [{ role: "user", content: "hello" }], max_tokens: 128, stream: true };
   expect(inputBound(body)).toBe(Buffer.byteLength(JSON.stringify(body.messages)) + 512);
   expect(validateBody(body, { ...booking, maxInput: inputBound(body) }, config)).toBe(128);
+});
+test("image read fits the model context with a conservative pixel allowance", () => {
+  const image = readFileSync(new URL("./fixtures/image.png", import.meta.url)).toString("base64");
+  const body = { model: config.model, max_tokens: 393216, messages: [{ role: "user", content: [{ type: "image_url", image_url: { url: `data:image/png;base64,${image}` } }] }] };
+  const bound = inputBound(body), model = { ...config, context_tokens: 1048576, output_tokens: 393216, input: ["image"] };
+  expect(bound).toBe(Buffer.byteLength(JSON.stringify(body.messages)) + 512 + 512 * 256 * 2);
+  expect(bound + body.max_tokens).toBeLessThanOrEqual(model.context_tokens);
+  expect(validateBody(body, { maxInput: bound, maxOutput: body.max_tokens, claimEnd: Date.now() / 1000 + 5000 }, model)).toBe(body.max_tokens);
+  expect(() => validateBody(body, { maxInput: bound - 1, maxOutput: body.max_tokens, claimEnd: Date.now() / 1000 + 5000 }, model)).toThrow("Input limit");
 });
 test("coding continuation accepts reasoning, tool calls, and matching tool results", () => {
   const body = { model: config.model, max_tokens: 1024, stream: true, tools: [{ type: "function", function: { name: "read", parameters: { type: "object", properties: { path: { type: "string" } } } } }], messages: [{ role: "user", content: "read a file" }, { role: "assistant", content: null, reasoning_content: "inspect first", tool_calls: [{ id: "call-one", type: "function", function: { name: "read", arguments: '{"path":"main.ts"}' } }] }, { role: "tool", tool_call_id: "call-one", content: "export const value = 1;" }] };
@@ -56,7 +66,7 @@ test("OpenCode's real chat encoder passes Fossa validation and decodes streamed 
 
 test("text bounds never clamp away oversized input and combined context stays bounded", () => {
   const body = { model: config.model, max_tokens: 1024, messages: [{ role: "user", content: "a".repeat(2048) }] };
-  expect(inputBound(body, 1024)).toBeGreaterThan(2048);
+  expect(inputBound(body)).toBeGreaterThan(2048);
   expect(() => validateBody(body, { ...booking, maxInput: 1024 }, { ...config, context_tokens: 1024 })).toThrow("Input limit");
   const bound = inputBound(body);
   expect(() => validateBody(body, { ...booking, maxInput: bound }, { ...config, context_tokens: bound + 1023 })).toThrow("Context limit");
