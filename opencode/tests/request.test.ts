@@ -1,7 +1,5 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { createHash } from "node:crypto";
-import imageCases from "./fixtures/image-token-cases.json";
 import { estimateInput, measureInput, validateBody, inputBound } from "../src/protocol";
 import { make } from "@opencode/ai/promise";
 import { configure } from "@opencode/ai/providers/openai-compatible";
@@ -26,35 +24,25 @@ test("checkpoint reservations cover each image and exclude only its transport by
   const messages = [{ role: "user", content: [{ type: "text", text: url }, part, part] }];
   const body = { model: config.model, messages, max_tokens: 128 };
   const bytes = Buffer.byteLength(JSON.stringify(messages));
-  for (const [id, tokens] of imageCases) {
-    const checkpoint = createHash("sha256").update(String(id)).digest("hex");
-    const model = { ...config, checkpoint, input: ["text", "image"] };
-    const expected = bytes - 2 * url.length + 512 + 2 * Number(tokens);
-    const measurement = measureInput(body, checkpoint);
+  for (const invalid of [null, 0, -1, 1.5, 2 ** 32]) expect(() => measureInput(body, invalid)).toThrow("image token limit");
+  for (const tokens of [73, 1500]) {
+    const model = { ...config, maxImageTokens: tokens, input: ["text", "image"] };
+    const expected = bytes - 2 * url.length + 512 + 2 * tokens;
+    const measurement = measureInput(body, tokens);
     expect(measurement.bound).toBe(expected);
-    expect(estimateInput(bytes, measurement)).toBe(Math.ceil((bytes - 2 * url.length) / 4) + 2 * Number(tokens));
+    expect(estimateInput(bytes, measurement)).toBe(Math.ceil((bytes - 2 * url.length) / 4) + 2 * tokens);
     expect(validateBody(body, { ...booking, maxInput: expected }, model)).toBe(128);
     expect(() => validateBody(body, { ...booking, maxInput: expected - 1 }, model)).toThrow("Input limit");
   }
 });
 
-test("deepseek screenshot fits at its published image ceiling regardless of compression", () => {
-  const checkpoint = createHash("sha256").update("deepseek-ai/DeepSeek-V4.1-Flash-1017").digest("hex");
+test("image ceiling is independent of compression", () => {
   const bounds = ["screenshot.png", "screenshot-small.png"].map(file => {
     const image = readFileSync(new URL(`./fixtures/${file}`, import.meta.url)).toString("base64");
-    return inputBound({ messages: [{ role: "user", content: [{ type: "image_url", image_url: { url: `data:image/png;base64,${image}` } }] }] }, checkpoint);
+    return inputBound({ messages: [{ role: "user", content: [{ type: "image_url", image_url: { url: `data:image/png;base64,${image}` } }] }] }, 1024);
   });
   expect(bounds[0]).toBe(bounds[1]);
   expect(bounds[0]).toBeLessThan(1700);
-});
-test("image read fits the model context with a conservative pixel allowance", () => {
-  const image = readFileSync(new URL("./fixtures/image.png", import.meta.url)).toString("base64");
-  const body = { model: config.model, max_tokens: 393216, messages: [{ role: "user", content: [{ type: "image_url", image_url: { url: `data:image/png;base64,${image}` } }] }] };
-  const bound = inputBound(body), model = { ...config, context_tokens: 1048576, output_tokens: 393216, input: ["image"] };
-  expect(bound).toBe(Buffer.byteLength(JSON.stringify(body.messages)) + 512 + 512 * 256 * 2);
-  expect(bound + body.max_tokens).toBeLessThanOrEqual(model.context_tokens);
-  expect(validateBody(body, { maxInput: bound, maxOutput: body.max_tokens, claimEnd: Date.now() / 1000 + 5000 }, model)).toBe(body.max_tokens);
-  expect(() => validateBody(body, { maxInput: bound - 1, maxOutput: body.max_tokens, claimEnd: Date.now() / 1000 + 5000 }, model)).toThrow("Input limit");
 });
 test("coding continuation accepts reasoning, tool calls, and matching tool results", () => {
   const body = { model: config.model, max_tokens: 1024, stream: true, tools: [{ type: "function", function: { name: "read", parameters: { type: "object", properties: { path: { type: "string" } } } } }], messages: [{ role: "user", content: "read a file" }, { role: "assistant", content: null, reasoning_content: "inspect first", tool_calls: [{ id: "call-one", type: "function", function: { name: "read", arguments: '{"path":"main.ts"}' } }] }, { role: "tool", tool_call_id: "call-one", content: "export const value = 1;" }] };

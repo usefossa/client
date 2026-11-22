@@ -25,7 +25,7 @@ export interface PublicConfig { providerLimitLookupTables?: string[];
   opencode: { deviceConnect?: boolean; manualImport?: boolean; siteUrl: string; deviceTtlSecs: number; maxInputTokens: number; maxRequestBytes: number; catalogMaxAgeMs: number; requestTimeoutMs: number; pollIntervalMs: number; mainnetGenesisHash: string; localBookingPoolSize: number };
 }
 export interface Offer {
-  checkpoint: string; checkpointId: string; checkpointName: string; checkpointOrder: number | null; modalities: { input: string[]; output: string[] }; contextTokens: number; inputBoundTokens: number; outputTokens: number;
+  maxImageTokens?: number | null; checkpoint: string; checkpointId: string; checkpointName: string; checkpointOrder: number | null; modalities: { input: string[]; output: string[] }; contextTokens: number; inputBoundTokens: number; outputTokens: number;
   providerLimitId?: number | null;
   slot: number; provider: ProviderLimitState & { bookingLimits?: WalletBookingLimits | null; requestLimits?: RequestLimits | null; wallet: string; name: string; endpoint?: string }; inputRate: number; cachedRate: number; outputRate: number;
   speed: number; available: boolean; active: boolean; private: boolean; capacity: number; activeBookings: number;

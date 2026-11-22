@@ -10,7 +10,7 @@ import { providerFetch } from "./provider-fetch";
 import { api, config, safeUrl } from "../api";
 import { signMessage } from "../account/signing";
 import { Store, type Pending } from "../account/store";
-import { estimateInput, estimateMessages, measureInput, validateBody } from "../protocol";
+import { estimateInput, estimateMessages, imageAllowance, inspectInput, validateBody } from "../protocol";
 import { recoverable, rakebackDollars } from "./rakeback";
 import { FossaError, type Account, type Catalog, type Chain, type MarketModel, type Offer, type PublicConfig, type RakebackFunds, type RakebackState, type Settings, type Status, type TransactionFees, type WalletState } from "../types";
 
@@ -549,28 +549,31 @@ export class FossaClient {
       const settings = this.settings(modelId), requirements = routingRequirements(model, settings);
       if (!requirements.checkpoint) throw new FossaError("NO_PROVIDER", "No provider matches this model’s published version.");
       const requestedOutput = parsed.max_tokens ?? parsed.max_completion_tokens, maxOutput = settings.advancedRouting && settings.maxOutputTokens != null ? settings.maxOutputTokens : requestedOutput;
-      if (Array.isArray(parsed.messages) && parsed.messages.some((message: any) => Array.isArray(message?.content) && message.content.some((part: any) => part?.type === "image_url"))) {
+      const { textBound, inlineBytes, imageCount } = inspectInput(parsed);
+      let imageLimit: number | undefined;
+      if (imageCount) {
         requirements.inputModalities |= 2;
-        // bind image accounting and eventual matching to the same checkpoint, including legacy offers.
-        const checkpoints = new Set(model.offers.filter(offer => offer.active && offerFits(offer, requirements)).map(offer => offer.checkpoint));
-        if (checkpoints.size === 1) {
-          requirements.checkpoint = [...checkpoints][0];
-        } else if (checkpoints.size > 1) {
-          const available = [...checkpoints].flatMap(checkpoint => {
-            const input = measureInput(parsed, checkpoint).bound;
-            if (input > (settings.advancedRouting ? settings.maxInputTokens ?? Infinity : Infinity) || input > this.cfg.opencode.maxInputTokens) return [];
-            return eligible(model!, settings, input, maxOutput, { ...requirements, checkpoint, allowUnversioned: false });
-          });
-          requirements.checkpoint = rankOffers(available, settings)[0]?.checkpoint ?? requirements.checkpoint;
-        }
+        const compatible = model.offers.filter(offer => offer.active && offerFits(offer, requirements) && offer.maxImageTokens != null);
+        if (!compatible.length) throw new FossaError("NO_PROVIDER", "No eligible checkpoint has a published image token limit.");
+        const available = new Set(eligible(model, settings, 0, maxOutput, requirements));
+        const viable = compatible.filter(offer => {
+          const bound = textBound + imageAllowance(imageCount, offer.maxImageTokens);
+          const input = settings.advancedRouting ? settings.maxInputTokens ?? bound : bound;
+          return bound <= input && input <= this.cfg.opencode.maxInputTokens && offerFits(offer, requirements, input, maxOutput);
+        });
+        const ready = viable.filter(offer => available.has(offer));
+        const selected = rankOffers(ready.length ? ready : viable, settings)[0] ?? compatible[0];
+        requirements.checkpoint = selected.checkpoint;
         requirements.allowUnversioned = false;
+        imageLimit = selected.maxImageTokens!;
       }
       const candidates = model.offers.filter(offer => offer.active && offerFits(offer, requirements));
+      if (imageCount && candidates.some(offer => offer.maxImageTokens !== imageLimit)) throw new FossaError("CONFIGURATION", "Catalog has inconsistent image token limits.");
       const context = Math.max(0, ...candidates.map(offer => offer.contextTokens)), inputCap = Math.max(0, ...candidates.map(offer => offer.inputBoundTokens)), outputCap = Math.max(0, ...candidates.map(offer => offer.outputTokens));
-      const { bound: requiredInput, inlineBytes, imageTokens } = measureInput(parsed, requirements.checkpoint);
+      const imageTokens = imageAllowance(imageCount, imageLimit), requiredInput = textBound + imageTokens;
       const maxInput = settings.advancedRouting && settings.maxInputTokens != null ? settings.maxInputTokens : requiredInput;
       if (!Array.isArray(parsed.messages) || !Number.isSafeInteger(maxOutput) || !maxOutput || maxOutput < 1 || maxOutput > outputCap || requiredInput > maxInput || maxInput > Math.min(inputCap, this.cfg.opencode.maxInputTokens) || maxInput + maxOutput > context || !Number.isSafeInteger(requestedOutput) || !requestedOutput || requestedOutput > maxOutput) throw new FossaError("TOKEN_LIMIT", "Request exceeds eligible provider token bounds. Reduce context or output limit before retrying.");
-      validateBody(parsed, { maxInput, maxOutput, claimEnd: Number.MAX_SAFE_INTEGER }, { model: model.id, checkpoint: requirements.checkpoint, speed_tps: 1, context_tokens: context, max_input_bound: inputCap, output_tokens: outputCap, tools: model.capabilities?.tools === true, input: candidates.flatMap(offer => offer.modalities.input), effort: model.variants?.map(variant => variant.body.reasoning_effort) ?? model.effort });
+      validateBody(parsed, { maxInput, maxOutput, claimEnd: Number.MAX_SAFE_INTEGER }, { model: model.id, maxImageTokens: imageLimit, speed_tps: 1, context_tokens: context, max_input_bound: inputCap, output_tokens: outputCap, tools: model.capabilities?.tools === true, input: candidates.flatMap(offer => offer.modalities.input), effort: model.variants?.map(variant => variant.body.reasoning_effort) ?? model.effort });
       if (this.rows(true).some(row => ["prepared", "sent", "uncertain"].includes(row.stage))) {
         const recoveryAt = Date.now();
         await this.reconcile(true);
@@ -588,7 +591,7 @@ export class FossaClient {
         if (row.cache.prefix === prefixes.get(row.cache.messages)) { prior = row; break; }
       }
       const continued = prior && parsed.messages.slice(prior.cache!.messages).some(message => message && typeof message === "object" && "role" in message && message.role === "assistant");
-      const cached = prior ? Math.min(estimatedInput, prior.usage!.input + (continued ? prior.usage!.output : 0), estimateMessages(parsed.messages.slice(0, Math.max(prior.cache!.messages, parsed.messages.length - 1)), requirements.checkpoint)) : 0;
+      const cached = prior ? Math.min(estimatedInput, prior.usage!.input + (continued ? prior.usage!.output : 0), estimateMessages(parsed.messages.slice(0, Math.max(prior.cache!.messages, parsed.messages.length - 1)), imageLimit)) : 0;
       const estimate = { input: estimatedInput, cached, output: estimatedOutput, provider: prior?.provider };
       let ranked = rankOffers(eligible(model, settings, maxInput, maxOutput, requirements), settings, estimate);
       const admissionAt = Date.now(), admissionDeadline = admissionAt + this.cfg.opencode.requestTimeoutMs;
@@ -600,6 +603,9 @@ export class FossaClient {
         if (refresh) { const version = this.catalogVersion; this.updateCatalog(await api<Catalog>(this.account.apiUrl, "/market/catalog", { signal }), version); }
         model = this.catalog.models.find(value => value.id === modelId);
         if (!model) throw new FossaError("MODEL_UNAVAILABLE", "Selected Fossa model is unavailable.");
+        if (imageCount && model.offers.some(offer => offer.active && offerFits(offer, requirements) && offer.maxImageTokens !== imageLimit)) {
+          throw new FossaError("CATALOG_STALE", "The checkpoint image limit changed. Retry with the current catalog.");
+        }
         ranked = rankOffers(eligible(model, settings, maxInput, maxOutput, requirements), settings, estimate);
         if (!ranked.length && settling(model, settings, maxInput, maxOutput, requirements)) refresh = !await this.waitForCatalog(signal, admissionDeadline);
       }
