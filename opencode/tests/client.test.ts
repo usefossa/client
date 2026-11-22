@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { Connection, Keypair, PublicKey, Transaction, VersionedTransaction } from "@solana/web3.js";
 import { getAssociatedTokenAddress, TOKEN_PROGRAM_ID } from "../src/account/token";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
@@ -18,7 +18,7 @@ import { listRoutingAddresses, providerWalletAddress } from "../src/inference/pr
 const discriminator = (name: string) => createHash("sha256").update(name).digest().subarray(0, 8);
 const providerTest = test.skipIf(!process.env.FOSSA_PROVIDER_ROOT);
 
-async function fixture(customError = 2, retries = 0, scoped = false) {
+async function fixture(customError = 2, retries = 0, scoped = false, imageCheckpoint?: string) {
   const directory = mkdtempSync(join(tmpdir(), "fossa-client-test-")), store = new Store(directory);
   const owner = await Keypair.generate(), lane = await Keypair.generate(), booking = await Keypair.generate(), provider = await Keypair.generate(), program = (await Keypair.generate()).publicKey, market = (await Keypair.generate()).publicKey, model = (await PublicKey.findProgramAddress([Buffer.from("model"), market.toBytes(), createHash("sha256").update("fixture/coder").digest()], program))[0], mint = (await Keypair.generate()).publicKey;
   const source = await getAssociatedTokenAddress(mint, owner.publicKey), vault = await getAssociatedTokenAddress(mint, (await PublicKey.findProgramAddress([Buffer.from("vault"), lane.publicKey.toBytes()], program))[0], true);
@@ -125,7 +125,7 @@ async function fixture(customError = 2, retries = 0, scoped = false) {
       tokenData.writeBigUInt64LE(tokenData.readBigUInt64LE(64) - deposit, 64);
       userData.writeBigUInt64LE(userData.readBigUInt64LE(72) + deposit - payload.readBigUInt64LE(55), 72);
       Buffer.from(new PublicKey(cfg.providerList).toBytes()).copy(target, 320);
-      Buffer.from(model.toBytes()).copy(target, 224); Buffer.from(new PublicKey(matched.provider.wallet).toBytes()).copy(target, 40); payload.subarray(147, 155).copy(target, 152); payload.subarray(55, 63).copy(target, 104); payload.subarray(46, 50).copy(target, 124); payload.subarray(50, 54).copy(target, 128); target.writeBigInt64LE(BigInt(Math.floor(Date.now() / 1000) + 300 + Math.ceil(payload.readUInt32LE(50) / matched.speed)), 132); target[148] = 0; target[356] = scoped ? 2 : 0; target.copy(userData, 112, 152, 160); target.writeUInt32LE(matched.slot, 352); payload.subarray(107, 139).copy(target, 472); target.writeUInt32LE(matched.contextTokens, 504); target.writeUInt32LE(matched.inputBoundTokens, 508); target.writeUInt32LE(matched.outputTokens, 512); target.set([1, 1, payload[139], payload[140]], 516);
+      Buffer.from(model.toBytes()).copy(target, 224); Buffer.from(new PublicKey(matched.provider.wallet).toBytes()).copy(target, 40); payload.subarray(147, 155).copy(target, 152); payload.subarray(55, 63).copy(target, 104); payload.subarray(46, 50).copy(target, 124); payload.subarray(50, 54).copy(target, 128); target.writeBigInt64LE(BigInt(Math.floor(Date.now() / 1000) + 300 + Math.ceil(payload.readUInt32LE(50) / matched.speed)), 132); target[148] = 0; target[356] = scoped ? 2 : 0; target.copy(userData, 112, 152, 160); target.writeUInt32LE(matched.slot, 352); payload.subarray(107, 139).copy(target, 472); target.writeUInt32LE(matched.contextTokens, 504); target.writeUInt32LE(matched.inputBoundTokens, 508); target.writeUInt32LE(matched.outputTokens, 512); target.set([matched.modalities.input.includes("image") ? 3 : 1, 1, payload[139], payload[140]], 516);
       for (const socket of sockets) if (socket.data.subscribed) socket.send(JSON.stringify({ jsonrpc: "2.0", method: "accountNotification", params: { subscription: 1, result: { context: { slot: 100 }, value: { data: [target.toString("base64"), "base64"], owner: program.toString(), lamports: 1000, executable: false, rentEpoch: 0 } } } }));
       for (const socket of sockets) if (socket.data.live && socket.data.watch === instruction.keys[6].pubkey.toString()) socket.send(JSON.stringify({ type: "booking", address: socket.data.watch, data: { owner: program.toString(), data: target.toString("base64"), slot: 100 } }));
       if (lostFirst) { lostFirst = false; return new Response("Submission response lost", { status: 503 }); }
@@ -144,8 +144,8 @@ async function fixture(customError = 2, retries = 0, scoped = false) {
   }
   let providerStream: ReturnType<typeof Bun.serve>;
   try { providerStream = Bun.serve({ hostname: "127.0.0.1", port: Number(server.port) + 1, fetch(request, socket) { if (socket.upgrade(request, { data: undefined })) return; return new Response(null, { status: 400 }); }, websocket: { message(socket, message) { const request = JSON.parse(String(message)); socket.send(JSON.stringify({ jsonrpc: "2.0", id: request.id, result: request.method.endsWith("Unsubscribe") ? true : request.id })); } } }); }
-  catch (error) { server.stop(true); store.close(); rmSync(directory, { recursive: true, force: true }); if ((error as { code?: string }).code === "EADDRINUSE" && retries < 10) return fixture(customError, retries + 1, scoped); throw error; }
-  providerServer = await rustProvider({ rpc: cfg.solanaRpc, program: cfg.programId, market: cfg.market, mint: cfg.usdcMint, seed: [...provider.secretKey.slice(0, 32)] });
+  catch (error) { server.stop(true); store.close(); rmSync(directory, { recursive: true, force: true }); if ((error as { code?: string }).code === "EADDRINUSE" && retries < 10) return fixture(customError, retries + 1, scoped, imageCheckpoint); throw error; }
+  providerServer = await rustProvider({ rpc: cfg.solanaRpc, program: cfg.programId, market: cfg.market, mint: cfg.usdcMint, image_checkpoint: imageCheckpoint, seed: [...provider.secretKey.slice(0, 32)] });
   catalog.models[0].offers[0].provider.endpoint = server.url.origin + "/v1/chat/completions";
   const account: Account = { walletId: "fixture-wallet", wallet: owner.publicKey.toString(), lane: lane.publicKey.toString(), name: "Fixture", apiUrl: server.url.origin, rpcUrl: server.url.origin + "/rpc", rpcWsUrl: server.url.origin.replace("http:", "ws:") + "/rpc", access: "fixture-access", refresh: "fixture-refresh", expires: Date.now() + 100000 };
   await store.save(account, { owner: [...owner.secretKey], lane: [...lane.secretKey], bookings: { [booking.publicKey.toString()]: [...booking.secretKey] } }, "fixture wallet passphrase");
@@ -426,6 +426,27 @@ providerTest("per-model routing modes constrain signed bookings to the selected 
       expect(f.bookData.readUInt32LE(352)).toBe(slot);
     }
     expect(f.submissions()).toBe(3);
+  } finally { await f.close(); }
+});
+
+providerTest("screenshot booking reaches the Rust provider with a checkpoint image allowance", async () => {
+  const checkpoint = "deepseek-ai/DeepSeek-V4.1-Flash-1017";
+  const f = await fixture(2, 0, false, checkpoint);
+  try {
+    const model = f.catalog.models[0], offer = model.offers[0];
+    offer.checkpointId = checkpoint;
+    offer.checkpoint = createHash("sha256").update(checkpoint).digest("hex");
+    offer.modalities.input = ["text", "image"];
+    await f.client.refresh();
+    const image = readFileSync(new URL("./fixtures/screenshot.png", import.meta.url)).toString("base64");
+    const url = `data:image/png;base64,${image}`;
+    const messages = [{ role: "user", content: [{ type: "image_url", image_url: { url } }] }];
+    const body = JSON.stringify({ model: model.id, messages, max_tokens: 128, stream: true });
+    const routed = await f.client.request("screenshot", model.id, body, "session", "primary", new AbortController().signal);
+    expect(f.bookData.readUInt32LE(124)).toBe(Buffer.byteLength(JSON.stringify(messages)) - url.length + 512 + 1024);
+    const response = await fetch(routed.url, { method: "POST", headers: routed.headers, body });
+    expect(await response.text()).toContain("Hello");
+    expect(response.status).toBe(200);
   } finally { await f.close(); }
 });
 

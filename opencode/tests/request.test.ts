@@ -1,6 +1,8 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { validateBody, inputBound } from "../src/protocol";
+import { createHash } from "node:crypto";
+import imageCases from "./fixtures/image-token-cases.json";
+import { estimateInput, measureInput, validateBody, inputBound } from "../src/protocol";
 import { make } from "@opencode/ai/promise";
 import { configure } from "@opencode/ai/providers/openai-compatible";
 
@@ -15,6 +17,35 @@ test("website text requests retain their existing token bound", () => {
   const body = { model: config.model, messages: [{ role: "user", content: "hello" }], max_tokens: 128, stream: true };
   expect(inputBound(body)).toBe(Buffer.byteLength(JSON.stringify(body.messages)) + 512);
   expect(validateBody(body, { ...booking, maxInput: inputBound(body) }, config)).toBe(128);
+});
+const fixture = readFileSync(new URL("./fixtures/image.png", import.meta.url));
+
+test("checkpoint reservations cover each image and exclude only its transport bytes", () => {
+  const url = `data:image/png;base64,${fixture.toString("base64")}`;
+  const part = { type: "image_url", image_url: { url } };
+  const messages = [{ role: "user", content: [{ type: "text", text: url }, part, part] }];
+  const body = { model: config.model, messages, max_tokens: 128 };
+  const bytes = Buffer.byteLength(JSON.stringify(messages));
+  for (const [id, tokens] of imageCases) {
+    const checkpoint = createHash("sha256").update(String(id)).digest("hex");
+    const model = { ...config, checkpoint, input: ["text", "image"] };
+    const expected = bytes - 2 * url.length + 512 + 2 * Number(tokens);
+    const measurement = measureInput(body, checkpoint);
+    expect(measurement.bound).toBe(expected);
+    expect(estimateInput(bytes, measurement)).toBe(Math.ceil((bytes - 2 * url.length) / 4) + 2 * Number(tokens));
+    expect(validateBody(body, { ...booking, maxInput: expected }, model)).toBe(128);
+    expect(() => validateBody(body, { ...booking, maxInput: expected - 1 }, model)).toThrow("Input limit");
+  }
+});
+
+test("deepseek screenshot fits at its published image ceiling regardless of compression", () => {
+  const checkpoint = createHash("sha256").update("deepseek-ai/DeepSeek-V4.1-Flash-1017").digest("hex");
+  const bounds = ["screenshot.png", "screenshot-small.png"].map(file => {
+    const image = readFileSync(new URL(`./fixtures/${file}`, import.meta.url)).toString("base64");
+    return inputBound({ messages: [{ role: "user", content: [{ type: "image_url", image_url: { url: `data:image/png;base64,${image}` } }] }] }, checkpoint);
+  });
+  expect(bounds[0]).toBe(bounds[1]);
+  expect(bounds[0]).toBeLessThan(1700);
 });
 test("image read fits the model context with a conservative pixel allowance", () => {
   const image = readFileSync(new URL("./fixtures/image.png", import.meta.url)).toString("base64");

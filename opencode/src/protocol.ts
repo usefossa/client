@@ -1,7 +1,15 @@
+import { createHash } from "node:crypto";
+import imageProfiles from "./image-token-bounds.json";
+
+type ImageProfile = { maxTokens: number; gridPixels?: number; maxGridSide?: number };
+const imageBounds = new Map<string, ImageProfile>(Object.entries(imageProfiles).map(([checkpoint, profile]) => [
+  createHash("sha256").update(checkpoint).digest("hex"), profile,
+]));
+
 type Message = { role?: unknown; content?: unknown; tool_calls?: unknown; tool_call_id?: unknown; name?: unknown; reasoning_content?: unknown; refusal?: unknown };
 const fields = new Set(["model", "messages", "max_tokens", "max_completion_tokens", "stream", "reasoning_effort", "tools", "tool_choice", "parallel_tool_calls", "temperature", "top_p", "frequency_penalty", "presence_penalty", "seed", "stop", "response_format", "stream_options", "store", "n", "logprobs"]);
 
-function imagePixels(url: unknown) {
+function imageDimensions(url: unknown) {
   if (typeof url !== "string") throw Error("Image dimensions unavailable");
   const match = /^data:image\/(png|jpeg|webp|gif);base64,/.exec(url);
   if (!match) throw Error("Image dimensions unavailable");
@@ -32,15 +40,54 @@ function imagePixels(url: unknown) {
     }
   }
   if (!width || !height || !Number.isSafeInteger(width * height * 2)) throw Error("Image dimensions unavailable");
-  return width * height * 2;
+  return { width, height };
 }
 
-export function inputBound(body: { messages: unknown; tools?: unknown; response_format?: unknown }) {
-  const bytes = Buffer.byteLength(JSON.stringify(body.messages)) + (body.tools ? Buffer.byteLength(JSON.stringify(body.tools)) + 32 : 0) + (body.response_format != null ? Buffer.byteLength(JSON.stringify(body.response_format)) + 32 : 0) + 512;
-  const pixels = Array.isArray(body.messages) ? body.messages.reduce((total, message: any) => total + (Array.isArray(message?.content) ? message.content.reduce((sum: number, part: any) => sum + (part?.type === "image_url" ? imagePixels(part.image_url?.url) : 0), 0) : 0), 0) : 0;
-  return bytes + pixels;
+type RequestInput = { messages: unknown; tools?: unknown; response_format?: unknown };
+
+function measureImages(messages: unknown, checkpoint?: string) {
+  const profile = checkpoint && imageBounds.get(checkpoint);
+  let imageTokens = 0, inlineBytes = 0, totalPixels = 0;
+  for (const message of Array.isArray(messages) ? messages : []) {
+    for (const part of Array.isArray(message?.content) ? message.content : []) {
+      if (part?.type !== "image_url") continue;
+      const url = part.image_url?.url;
+      const { width, height } = imageDimensions(url);
+      totalPixels += width * height;
+      if (totalPixels > 64 * 1024 * 1024) throw Error("Attached images exceed the decoded pixel limit");
+      if (profile) {
+        inlineBytes += url.length;
+        const { gridPixels, maxGridSide } = profile;
+        imageTokens += gridPixels && maxGridSide
+          ? Math.min(profile.maxTokens, Math.min(maxGridSide, Math.ceil(width / gridPixels)) * Math.min(maxGridSide, Math.ceil(height / gridPixels)))
+          : profile.maxTokens;
+      } else {
+        // retain the previous reservation for checkpoints without a published processor bound.
+        imageTokens += 2 * width * height;
+      }
+    }
+  }
+  return { inlineBytes, imageTokens };
 }
-export function validateBody(value: unknown, booking: { maxInput: number; maxOutput: number; claimEnd: number }, config: { model: string; speed_tps: number; context_tokens: number; max_input_bound?: number; output_tokens: number; tools: boolean; input?: string[]; effort?: string[] }) {
+
+export function measureInput(body: RequestInput, checkpoint?: string) {
+  const bytes = Buffer.byteLength(JSON.stringify(body.messages)) + (body.tools ? Buffer.byteLength(JSON.stringify(body.tools)) + 32 : 0) + (body.response_format != null ? Buffer.byteLength(JSON.stringify(body.response_format)) + 32 : 0) + 512;
+  const images = measureImages(body.messages, checkpoint);
+  return { bound: bytes - images.inlineBytes + images.imageTokens, ...images };
+}
+
+export function estimateInput(bytes: number, images: { inlineBytes: number; imageTokens: number }) {
+  return Math.ceil((bytes - images.inlineBytes) / 4) + (images.inlineBytes ? images.imageTokens : 0);
+}
+
+export function estimateMessages(messages: unknown[], checkpoint?: string) {
+  return estimateInput(Buffer.byteLength(JSON.stringify(messages)), measureImages(messages, checkpoint));
+}
+
+export function inputBound(body: RequestInput, checkpoint?: string) {
+  return measureInput(body, checkpoint).bound;
+}
+export function validateBody(value: unknown, booking: { maxInput: number; maxOutput: number; claimEnd: number }, config: { model: string; checkpoint?: string; speed_tps: number; context_tokens: number; max_input_bound?: number; output_tokens: number; tools: boolean; input?: string[]; effort?: string[] }) {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw Error("Invalid request body");
   const body = value as Record<string, any>;
   if (body.model !== config.model) throw Error("Request model does not match the booked model");
@@ -86,7 +133,7 @@ export function validateBody(value: unknown, booking: { maxInput: number; maxOut
   if (body.stream_options != null && (body.stream !== true || typeof body.stream_options !== "object" || Array.isArray(body.stream_options) || Object.keys(body.stream_options).some(key => !["include_usage", "include_obfuscation"].includes(key) || typeof body.stream_options[key] !== "boolean"))) throw Error("Invalid stream options");
   const max = body.max_tokens ?? body.max_completion_tokens ?? Math.min(booking.maxOutput, config.output_tokens);
   if (!Number.isSafeInteger(max) || max < 1 || max > booking.maxOutput || max > config.output_tokens || body.max_tokens != null && body.max_completion_tokens != null) throw Error("Output limit exceeded");
-  const input = inputBound(body as { messages: unknown; tools?: unknown; response_format?: unknown });
+  const input = inputBound(body as RequestInput, config.checkpoint);
   if (input > booking.maxInput || booking.maxInput > (config.max_input_bound ?? config.context_tokens)) throw Error("Input limit exceeded");
   if (input + max > config.context_tokens) throw Error("Context limit exceeded");
   if (Date.now() / 1000 + Math.ceil(max / Math.max(1, config.speed_tps)) + 5 >= booking.claimEnd) throw Error("Booking deadline too short");

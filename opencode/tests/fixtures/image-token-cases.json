@@ -1,0 +1,26 @@
+[
+  [
+    "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+    1024
+  ],
+  [
+    "google/gemma-4-26B-A4B-it",
+    1120
+  ],
+  [
+    "meta-models/Muse-Glimmer-30B",
+    4096
+  ],
+  [
+    "moonshotai/Kimi-K3",
+    190
+  ],
+  [
+    "Qwen/Qwen3.8-27B",
+    16384
+  ],
+  [
+    "zai-org/GLM-5.3-Flash",
+    8000
+  ]
+]
