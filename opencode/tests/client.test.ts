@@ -145,7 +145,7 @@ async function fixture(customError = 2, retries = 0, scoped = false, imageCheckp
   let providerStream: ReturnType<typeof Bun.serve>;
   try { providerStream = Bun.serve({ hostname: "127.0.0.1", port: Number(server.port) + 1, fetch(request, socket) { if (socket.upgrade(request, { data: undefined })) return; return new Response(null, { status: 400 }); }, websocket: { message(socket, message) { const request = JSON.parse(String(message)); socket.send(JSON.stringify({ jsonrpc: "2.0", id: request.id, result: request.method.endsWith("Unsubscribe") ? true : request.id })); } } }); }
   catch (error) { server.stop(true); store.close(); rmSync(directory, { recursive: true, force: true }); if ((error as { code?: string }).code === "EADDRINUSE" && retries < 10) return fixture(customError, retries + 1, scoped, imageCheckpoint); throw error; }
-  providerServer = await rustProvider({ rpc: cfg.solanaRpc, program: cfg.programId, market: cfg.market, mint: cfg.usdcMint, image_checkpoint: imageCheckpoint, seed: [...provider.secretKey.slice(0, 32)] });
+  providerServer = await rustProvider({ rpc: cfg.solanaRpc, program: cfg.programId, market: cfg.market, mint: cfg.usdcMint, image_checkpoint: imageCheckpoint, max_image_tokens: imageCheckpoint ? 73 : undefined, seed: [...provider.secretKey.slice(0, 32)] });
   catalog.models[0].offers[0].provider.endpoint = server.url.origin + "/v1/chat/completions";
   const account: Account = { walletId: "fixture-wallet", wallet: owner.publicKey.toString(), lane: lane.publicKey.toString(), name: "Fixture", apiUrl: server.url.origin, rpcUrl: server.url.origin + "/rpc", rpcWsUrl: server.url.origin.replace("http:", "ws:") + "/rpc", access: "fixture-access", refresh: "fixture-refresh", expires: Date.now() + 100000 };
   await store.save(account, { owner: [...owner.secretKey], lane: [...lane.secretKey], bookings: { [booking.publicKey.toString()]: [...booking.secretKey] } }, "fixture wallet passphrase");
@@ -430,7 +430,7 @@ providerTest("per-model routing modes constrain signed bookings to the selected 
 });
 
 providerTest("screenshot booking reaches the Rust provider with a checkpoint image allowance", async () => {
-  const checkpoint = "deepseek-ai/DeepSeek-V4.1-Flash-1017";
+  const checkpoint = "independent/new-vision-model@revision";
   const f = await fixture(2, 0, false, checkpoint);
   try {
     const model = f.catalog.models[0], offer = model.offers[0];
@@ -442,8 +442,12 @@ providerTest("screenshot booking reaches the Rust provider with a checkpoint ima
     const url = `data:image/png;base64,${image}`;
     const messages = [{ role: "user", content: [{ type: "image_url", image_url: { url } }] }];
     const body = JSON.stringify({ model: model.id, messages, max_tokens: 128, stream: true });
+    await expect(f.client.request("missing-limit", model.id, body, "session", "primary", new AbortController().signal)).rejects.toThrow("published image token limit");
+    expect(f.submissions()).toBe(0);
+    offer.maxImageTokens = 73;
+    await f.client.refresh();
     const routed = await f.client.request("screenshot", model.id, body, "session", "primary", new AbortController().signal);
-    expect(f.bookData.readUInt32LE(124)).toBe(Buffer.byteLength(JSON.stringify(messages)) - url.length + 512 + 1024);
+    expect(f.bookData.readUInt32LE(124)).toBe(Buffer.byteLength(JSON.stringify(messages)) - url.length + 512 + 73);
     const response = await fetch(routed.url, { method: "POST", headers: routed.headers, body });
     expect(await response.text()).toContain("Hello");
     expect(response.status).toBe(200);
