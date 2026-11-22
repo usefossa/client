@@ -4,6 +4,9 @@ import { inputBound, validateBody } from "../src/protocol";
 
 test.skipIf(!process.env.FOSSA_PROVIDER_ROOT)("rust and client share request and input-accounting fixtures", async () => {
   const root = process.env.FOSSA_PROVIDER_ROOT!;
+  for (const file of ["src/image-token-bounds.json", "tests/fixtures/image-token-cases.json"]) {
+    expect(await Bun.file(join(root, file)).json()).toEqual(await Bun.file(new URL(`../${file}`, import.meta.url)).json());
+  }
   const fixtures = await Bun.file(join(root, "tests/fixtures/protocol.json")).json();
   const config = { ...fixtures.model, model: fixtures.model.id, tools: true, speed_tps: 100, effort: fixtures.model.reasoning_mode === "toggle" ? ["none", "high"] : fixtures.model.effort };
   for (const input of fixtures.cases) {

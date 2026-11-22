@@ -10,7 +10,7 @@ import { providerFetch } from "./provider-fetch";
 import { api, config, safeUrl } from "../api";
 import { signMessage } from "../account/signing";
 import { Store, type Pending } from "../account/store";
-import { inputBound, validateBody } from "../protocol";
+import { estimateInput, estimateMessages, measureInput, validateBody } from "../protocol";
 import { recoverable, rakebackDollars } from "./rakeback";
 import { FossaError, type Account, type Catalog, type Chain, type MarketModel, type Offer, type PublicConfig, type RakebackFunds, type RakebackState, type Settings, type Status, type TransactionFees, type WalletState } from "../types";
 
@@ -517,7 +517,8 @@ export class FossaClient {
     const requestTiming = { ...timing, previousRequestId: previousRequest?.id, ...(gap >= 0 ? { previousResponseFinishedAt, requestGapMs: gap } : {}) };
     let recoveryWaitMs = 0, admissionWaitMs = 0, bookingPoolWaitMs = 0;
     if (kind === "primary") this.publish({ requestId: callId, sessionID: session, model: modelId, provider: undefined, signature: undefined, booking: undefined, stage: "synchronizing", message: "Checking wallet and providers…" });
-    if (Buffer.byteLength(body) > this.cfg.opencode.maxRequestBytes) throw new FossaError("REQUEST_TOO_LARGE", "Request exceeds Fossa payload limit.");
+    const requestBytes = Buffer.byteLength(body);
+    if (requestBytes > this.cfg.opencode.maxRequestBytes) throw new FossaError("REQUEST_TOO_LARGE", "Request exceeds Fossa payload limit.");
     const hash = digest(body);
     const previous = this.localRequest(callId);
     if (previous) {
@@ -547,20 +548,36 @@ export class FossaClient {
       const parsed = JSON.parse(body) as { messages: unknown[]; tools?: unknown[]; response_format?: unknown; max_tokens?: number; max_completion_tokens?: number };
       const settings = this.settings(modelId), requirements = routingRequirements(model, settings);
       if (!requirements.checkpoint) throw new FossaError("NO_PROVIDER", "No provider matches this model’s published version.");
-      if (Array.isArray(parsed.messages) && parsed.messages.some((message: any) => Array.isArray(message?.content) && message.content.some((part: any) => part?.type === "image_url"))) requirements.inputModalities |= 2;
+      const requestedOutput = parsed.max_tokens ?? parsed.max_completion_tokens, maxOutput = settings.advancedRouting && settings.maxOutputTokens != null ? settings.maxOutputTokens : requestedOutput;
+      if (Array.isArray(parsed.messages) && parsed.messages.some((message: any) => Array.isArray(message?.content) && message.content.some((part: any) => part?.type === "image_url"))) {
+        requirements.inputModalities |= 2;
+        // bind image accounting and eventual matching to the same checkpoint, including legacy offers.
+        const checkpoints = new Set(model.offers.filter(offer => offer.active && offerFits(offer, requirements)).map(offer => offer.checkpoint));
+        if (checkpoints.size === 1) {
+          requirements.checkpoint = [...checkpoints][0];
+        } else if (checkpoints.size > 1) {
+          const available = [...checkpoints].flatMap(checkpoint => {
+            const input = measureInput(parsed, checkpoint).bound;
+            if (input > (settings.advancedRouting ? settings.maxInputTokens ?? Infinity : Infinity) || input > this.cfg.opencode.maxInputTokens) return [];
+            return eligible(model!, settings, input, maxOutput, { ...requirements, checkpoint, allowUnversioned: false });
+          });
+          requirements.checkpoint = rankOffers(available, settings)[0]?.checkpoint ?? requirements.checkpoint;
+        }
+        requirements.allowUnversioned = false;
+      }
       const candidates = model.offers.filter(offer => offer.active && offerFits(offer, requirements));
       const context = Math.max(0, ...candidates.map(offer => offer.contextTokens)), inputCap = Math.max(0, ...candidates.map(offer => offer.inputBoundTokens)), outputCap = Math.max(0, ...candidates.map(offer => offer.outputTokens));
-      const requiredInput = inputBound(parsed), maxInput = settings.advancedRouting && settings.maxInputTokens != null ? settings.maxInputTokens : requiredInput;
-      const requestedOutput = parsed.max_tokens ?? parsed.max_completion_tokens, maxOutput = settings.advancedRouting && settings.maxOutputTokens != null ? settings.maxOutputTokens : requestedOutput;
+      const { bound: requiredInput, inlineBytes, imageTokens } = measureInput(parsed, requirements.checkpoint);
+      const maxInput = settings.advancedRouting && settings.maxInputTokens != null ? settings.maxInputTokens : requiredInput;
       if (!Array.isArray(parsed.messages) || !Number.isSafeInteger(maxOutput) || !maxOutput || maxOutput < 1 || maxOutput > outputCap || requiredInput > maxInput || maxInput > Math.min(inputCap, this.cfg.opencode.maxInputTokens) || maxInput + maxOutput > context || !Number.isSafeInteger(requestedOutput) || !requestedOutput || requestedOutput > maxOutput) throw new FossaError("TOKEN_LIMIT", "Request exceeds eligible provider token bounds. Reduce context or output limit before retrying.");
-      validateBody(parsed, { maxInput, maxOutput, claimEnd: Number.MAX_SAFE_INTEGER }, { model: model.id, speed_tps: 1, context_tokens: context, max_input_bound: inputCap, output_tokens: outputCap, tools: model.capabilities?.tools === true, input: candidates.flatMap(offer => offer.modalities.input), effort: model.variants?.map(variant => variant.body.reasoning_effort) ?? model.effort });
+      validateBody(parsed, { maxInput, maxOutput, claimEnd: Number.MAX_SAFE_INTEGER }, { model: model.id, checkpoint: requirements.checkpoint, speed_tps: 1, context_tokens: context, max_input_bound: inputCap, output_tokens: outputCap, tools: model.capabilities?.tools === true, input: candidates.flatMap(offer => offer.modalities.input), effort: model.variants?.map(variant => variant.body.reasoning_effort) ?? model.effort });
       if (this.rows(true).some(row => ["prepared", "sent", "uncertain"].includes(row.stage))) {
         const recoveryAt = Date.now();
         await this.reconcile(true);
         recoveryWaitMs += Date.now() - recoveryAt;
         if (this.rows(true).some(row => ["prepared", "sent", "uncertain"].includes(row.stage))) throw new FossaError("RECOVERY_PENDING", "Previous payment is recovering automatically. Try again once its release is confirmed.");
       }
-      const estimatedInput = Math.min(maxInput, Math.ceil(Buffer.byteLength(body) / 4)), estimatedOutput = Math.min(requestedOutput, 256);
+      const estimatedInput = Math.min(maxInput, estimateInput(requestBytes, { inlineBytes, imageTokens })), estimatedOutput = Math.min(requestedOutput, 256);
       const prefix = (messages: number) => digest(JSON.stringify({ ...parsed, checkpoint: requirements.checkpoint, messages: parsed.messages.slice(0, messages) }));
       let prior: Pending | undefined;
       const prefixes = new Map<number, string>();
@@ -571,7 +588,7 @@ export class FossaClient {
         if (row.cache.prefix === prefixes.get(row.cache.messages)) { prior = row; break; }
       }
       const continued = prior && parsed.messages.slice(prior.cache!.messages).some(message => message && typeof message === "object" && "role" in message && message.role === "assistant");
-      const cached = prior ? Math.min(estimatedInput, prior.usage!.input + (continued ? prior.usage!.output : 0), Math.ceil(Buffer.byteLength(JSON.stringify(parsed.messages.slice(0, Math.max(prior.cache!.messages, parsed.messages.length - 1)))) / 4)) : 0;
+      const cached = prior ? Math.min(estimatedInput, prior.usage!.input + (continued ? prior.usage!.output : 0), estimateMessages(parsed.messages.slice(0, Math.max(prior.cache!.messages, parsed.messages.length - 1)), requirements.checkpoint)) : 0;
       const estimate = { input: estimatedInput, cached, output: estimatedOutput, provider: prior?.provider };
       let ranked = rankOffers(eligible(model, settings, maxInput, maxOutput, requirements), settings, estimate);
       const admissionAt = Date.now(), admissionDeadline = admissionAt + this.cfg.opencode.requestTimeoutMs;

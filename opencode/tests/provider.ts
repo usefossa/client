@@ -1,6 +1,6 @@
 import { join } from "node:path";
 
-export async function rustProvider(input: { rpc: string; program: string; market: string; mint: string; seed: number[] }) {
+export async function rustProvider(input: { rpc: string; program: string; market: string; mint: string; seed: number[]; image_checkpoint?: string }) {
   const root = process.env.FOSSA_PROVIDER_ROOT;
   if (!root) throw Error("Set FOSSA_PROVIDER_ROOT and build cargo example client-fixture first.");
   const child = Bun.spawn([join(root, "target/debug/examples/client-fixture")], { stdin: "pipe", stdout: "pipe", stderr: "inherit" });
