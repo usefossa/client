@@ -32,7 +32,7 @@ export async function providerFetch(request: Request, apiUrl: string, transport:
   if (url.origin === new URL(apiUrl).origin) return fetch(new Request(request, { redirect: "error" }));
   const hostname = url.hostname.replace(/^\[|\]$/g, "");
   if (url.protocol !== "https:" || url.username || url.password || url.hash || isIP(hostname) && !publicProviderAddress(hostname)) throw denied();
-  const response = await transport.request({ origin: url.origin, path: url.pathname + url.search, method: request.method as Dispatcher.HttpMethod, headers: { ...Object.fromEntries(request.headers), "accept-encoding": "gzip, deflate, br" }, body: await request.text(), signal: request.signal, maxRedirections: 0, headersTimeout: 60_000, bodyTimeout: 120_000 });
+  const response = await transport.request({ origin: url.origin, path: url.pathname + url.search, method: request.method as Dispatcher.HttpMethod, headers: { ...Object.fromEntries(request.headers), "accept-encoding": "gzip, deflate, br" }, body: request.body === null ? undefined : await request.text(), signal: request.signal, maxRedirections: 0, headersTimeout: 60_000, bodyTimeout: 120_000 });
   const headers = new Headers();
   for (const [name, value] of Object.entries(response.headers)) for (const field of Array.isArray(value) ? value : value === undefined ? [] : [value]) headers.append(name, field);
   const encoding = headers.get("content-encoding")?.trim().toLowerCase();
