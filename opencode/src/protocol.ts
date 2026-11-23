@@ -83,7 +83,7 @@ export function estimateMessages(messages: unknown[], maxImageTokens?: number | 
 export function inputBound(body: RequestInput, maxImageTokens?: number | null) {
   return measureInput(body, maxImageTokens).bound;
 }
-export function validateBody(value: unknown, booking: { maxInput: number; maxOutput: number; claimEnd: number }, config: { model: string; maxImageTokens?: number | null; speed_tps: number; context_tokens: number; max_input_bound?: number; output_tokens: number; tools: boolean; input?: string[]; effort?: string[] }) {
+export function validateBody(value: unknown, booking: { maxInput: number; maxOutput: number; claimEnd: number }, config: { model: string; exactTextTokens?: number; maxImageTokens?: number | null; speed_tps: number; context_tokens: number; max_input_bound?: number; output_tokens: number; tools: boolean; input?: string[]; effort?: string[] }) {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw Error("Invalid request body");
   const body = value as Record<string, any>;
   if (body.model !== config.model) throw Error("Request model does not match the booked model");
@@ -129,7 +129,7 @@ export function validateBody(value: unknown, booking: { maxInput: number; maxOut
   if (body.stream_options != null && (body.stream !== true || typeof body.stream_options !== "object" || Array.isArray(body.stream_options) || Object.keys(body.stream_options).some(key => !["include_usage", "include_obfuscation"].includes(key) || typeof body.stream_options[key] !== "boolean"))) throw Error("Invalid stream options");
   const max = body.max_tokens ?? body.max_completion_tokens ?? Math.min(booking.maxOutput, config.output_tokens);
   if (!Number.isSafeInteger(max) || max < 1 || max > booking.maxOutput || max > config.output_tokens || body.max_tokens != null && body.max_completion_tokens != null) throw Error("Output limit exceeded");
-  const input = inputBound(body as RequestInput, config.maxImageTokens);
+  const input = config.exactTextTokens ?? inputBound(body as RequestInput, config.maxImageTokens);
   if (input > booking.maxInput || booking.maxInput > (config.max_input_bound ?? config.context_tokens)) throw Error("Input limit exceeded");
   if (input + max > config.context_tokens) throw Error("Context limit exceeded");
   if (Date.now() / 1000 + Math.ceil(max / Math.max(1, config.speed_tps)) + 5 >= booking.claimEnd) throw Error("Booking deadline too short");

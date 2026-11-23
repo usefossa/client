@@ -1,6 +1,6 @@
 {
   "name": "@fossa/opencode",
-  "version": "0.24.0",
+  "version": "0.25.0",
   "private": true,
   "engines": {
     "bun": ">=1.3.14"
@@ -13,6 +13,7 @@
   },
   "files": [
     "src/**/*.ts",
+    "src/**/*.js",
     "src/**/*.tsx",
     "server.ts",
     "tui.tsx",
@@ -24,6 +25,8 @@
     "install:local": "bun scripts/install.ts"
   },
   "dependencies": {
+    "@huggingface/jinja": "0.5.13",
+    "@huggingface/tokenizers": "0.2.0",
     "@solana/web3.js": "3.1.1",
     "bs58": "6.0.0",
     "random-words": "2.0.1",

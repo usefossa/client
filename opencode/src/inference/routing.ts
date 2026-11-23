@@ -28,10 +28,10 @@ export function modelCheckpoints(model: MarketModel) {
 }
 export function routingRequirements(model: MarketModel, settings: Settings) {
   const versions = modelCheckpoints(model), advanced = settings.advancedRouting;
-  const checkpoint = (advanced && settings.modelCheckpoint ? versions.find(version => version.hash === settings.modelCheckpoint) ?? versions[0] : versions.at(-1))?.hash;
+  const checkpoint = advanced && settings.modelCheckpoint ? settings.modelCheckpoint : versions.at(-1)?.hash;
   return {
     checkpoint,
-    allowUnversioned: Boolean(checkpoint && checkpoint === versions[0]?.hash),
+    allowUnversioned: Boolean(!(advanced && settings.modelCheckpoint) && checkpoint && checkpoint === versions[0]?.hash),
     inputModalities: advanced ? settings.inputModalities ?? 1 : 1,
     outputModalities: advanced ? settings.outputModalities ?? 1 : 1,
     minContext: advanced ? settings.minContextTokens ?? 0 : 0,
@@ -47,7 +47,7 @@ export function modelLimits(model: MarketModel, settings: Settings) {
     context: Math.max(0, ...offers.map(offer => offer.contextTokens)),
     input: Math.max(0, ...offers.map(offer => offer.inputBoundTokens)),
     output: Math.min(settings.advancedRouting && settings.maxOutputTokens != null ? settings.maxOutputTokens : Infinity, Math.max(0, ...offers.map(offer => offer.outputTokens))),
-    modalities: { input: [...new Set(offers.flatMap(offer => offer.modalities.input))], output: [...new Set(offers.flatMap(offer => offer.modalities.output))] },
+    modalities: { input: [...new Set(offers.flatMap(offer => offer.modalities.input.filter(type => type === "text" || type === "image" && offer.maxImageTokens != null)))], output: [...new Set(offers.flatMap(offer => offer.modalities.output.filter(type => type === "text")))] },
   };
 }
 export function offerFits(offer: Offer, requirements: ReturnType<typeof routingRequirements>, input = 0, output = 0) {
@@ -71,20 +71,20 @@ export function rankOffers(offers: Offer[], settings: Settings, estimate?: Routi
   return [...offers].sort((a, b) => (settings.mode === "fastest" ? b.speed - a.speed : settings.mode === "balanced" ? score(a) - score(b) : 0) || cost(a) - cost(b) || b.speed - a.speed || a.slot - b.slot);
 }
 export const fee = (tokens: number, rate: number) => (BigInt(tokens) * BigInt(rate) + 999999n) / 1000000n;
-const matches = (offer: Offer, settings: Settings) => offer.active && offer.speed >= settings.minSpeed && (!settings.zdrOnly || offer.private) && !!offer.provider.endpoint
+export const matchesRouting = (offer: Offer, settings: Settings) => offer.active && offer.speed >= settings.minSpeed && (!settings.zdrOnly || offer.private) && !!offer.provider.endpoint
   && [offer.inputRate, offer.cachedRate, offer.outputRate].every((rate, index) => settings[priceFields[index]] === undefined || rate <= Math.floor(settings[priceFields[index]]! * 1_000_000));
 export function eligible(model: MarketModel, settings: Settings, input = 0, output = 0, requirements = routingRequirements(model, settings)) {
   const maxInput = Math.max(input, settings.advancedRouting ? settings.maxInputTokens ?? 0 : 0), maxOutput = Math.max(output, settings.advancedRouting ? settings.maxOutputTokens ?? 0 : 0);
-  return model.offers.filter(offer => offer.available && providerQuotaAvailable(offer.provider) && offer.activeBookings < offer.capacity && matches(offer, settings) && offerFits(offer, requirements, maxInput, maxOutput));
+  return model.offers.filter(offer => offer.available && providerQuotaAvailable(offer.provider) && offer.activeBookings < offer.capacity && matchesRouting(offer, settings) && offerFits(offer, requirements, maxInput, maxOutput));
 }
 
 export function settling(model: MarketModel, settings: Settings, input = 0, output = 0, requirements = routingRequirements(model, settings)) {
-  return model.offers.some(offer => matches(offer, settings) && offerFits(offer, requirements, input, output) && offer.activeBookings > 0);
+  return model.offers.some(offer => matchesRouting(offer, settings) && offerFits(offer, requirements, input, output) && offer.activeBookings > 0);
 }
 
 export function unavailable(model: MarketModel, settings: Settings, input: number, output: number) {
   const requirements = routingRequirements(model, settings);
-  const offers = model.offers.filter(offer => matches(offer, settings) && offerFits(offer, requirements, input, output)).map(offer => ({ provider: offer.provider.name, activeBookings: offer.activeBookings, capacity: offer.capacity, reserve: (fee(input, offer.inputRate) + fee(output, offer.outputRate) + 1n).toString() }));
+  const offers = model.offers.filter(offer => matchesRouting(offer, settings) && offerFits(offer, requirements, input, output)).map(offer => ({ provider: offer.provider.name, activeBookings: offer.activeBookings, capacity: offer.capacity, reserve: (fee(input, offer.inputRate) + fee(output, offer.outputRate) + 1n).toString() }));
   const message = !offers.length ? settings.advancedRouting && settings.minimumBookingRate === "unlimited"
     ? "No provider offers an uncapped wallet quota and matches your other filters. Choose Auto or a numeric quota."
     : "No provider matches this model’s version, modalities, token, concurrency, quota, price, speed, and data retention filters."

@@ -32,6 +32,8 @@ async function fixture(customError = 2, retries = 0, scoped = false, imageCheckp
   type SocketData = { subscribed: boolean; live?: boolean; watch?: string };
   const sockets = new Set<import("bun").ServerWebSocket<SocketData>>();
   const records = new Map([[source.toString(), { data: tokenData, owner: TOKEN_PROGRAM_ID }], [lane.publicKey.toString(), { data: userData, owner: program }], [booking.publicKey.toString(), { data: bookData, owner: program }]]);
+  const imageMetadata = imageCheckpoint ? JSON.stringify({ id: "fixture/coder", name: "Fixture", modalities: { input: ["text", "image"], output: ["text"] }, contextTokens: 1048576, outputTokens: 8192, checkpoints: [{ id: imageCheckpoint, name: "Fixture" }], imageTokensByCheckpoint: { [imageCheckpoint]: 73 } }) : undefined;
+  const metadataHash = imageMetadata && createHash("sha256").update(imageMetadata).digest("hex");
   records.set(model.toString(), { data: modelData, owner: program });
   let cfg: PublicConfig, catalog: Catalog, providerServer: Awaited<ReturnType<typeof rustProvider>>;
   const server = Bun.serve<SocketData>({ hostname: "127.0.0.1", port: 0, websocket: {
@@ -54,6 +56,7 @@ async function fixture(customError = 2, retries = 0, scoped = false, imageCheckp
     const url = new URL(request.url), json = (value: unknown) => Response.json(value);
     if (url.pathname === "/rpc" && request.method === "GET" && server.upgrade(request, { data: { subscribed: false } })) return;
     if (url.pathname === "/v1/opencode/live" && server.upgrade(request, { data: { subscribed: false, live: true } })) return;
+    if (metadataHash && url.pathname === `/v1/market/metadata/${metadataHash}`) return new Response(imageMetadata);
     if (url.pathname === "/v1/config") return json(cfg);
     if (url.pathname.startsWith("/v1/chat/completions")) return fetch(new Request(providerServer.url + url.pathname + url.search, request));
     if (url.pathname === "/v1/market/catalog") { catalogReads++; return json(catalog); }
@@ -142,10 +145,18 @@ async function fixture(customError = 2, retries = 0, scoped = false, imageCheckp
     catalog.models[0].offers[0].capacity = 2000;
     catalog.models[0].offers[0].provider.bookingLimits = { walletWindowSeconds: 60, walletBookingsPerWindow: 5000, walletBookingCapacity: 1000 };
   }
+  if (metadataHash) {
+    const [key, bump] = await PublicKey.findProgramAddress([Buffer.from("model_metadata"), model.toBytes()], program);
+    const data = Buffer.alloc(396), uri = Buffer.from(`${server.url.origin}/v1/market/metadata/${metadataHash}`);
+    data.set(discriminator("account:ModelMetadata")); data.set(market.toBytes(), 8); data.set(model.toBytes(), 40);
+    data.set(provider.publicKey.toBytes(), 72); data.set(Buffer.from(metadataHash, "hex"), 104);
+    data.writeUInt16LE(uri.length, 136); data[138] = bump; data.set(uri, 140);
+    records.set(key.toString(), { data, owner: program });
+  }
   let providerStream: ReturnType<typeof Bun.serve>;
   try { providerStream = Bun.serve({ hostname: "127.0.0.1", port: Number(server.port) + 1, fetch(request, socket) { if (socket.upgrade(request, { data: undefined })) return; return new Response(null, { status: 400 }); }, websocket: { message(socket, message) { const request = JSON.parse(String(message)); socket.send(JSON.stringify({ jsonrpc: "2.0", id: request.id, result: request.method.endsWith("Unsubscribe") ? true : request.id })); } } }); }
   catch (error) { server.stop(true); store.close(); rmSync(directory, { recursive: true, force: true }); if ((error as { code?: string }).code === "EADDRINUSE" && retries < 10) return fixture(customError, retries + 1, scoped, imageCheckpoint); throw error; }
-  providerServer = await rustProvider({ rpc: cfg.solanaRpc, program: cfg.programId, market: cfg.market, mint: cfg.usdcMint, image_checkpoint: imageCheckpoint, max_image_tokens: imageCheckpoint ? 73 : undefined, seed: [...provider.secretKey.slice(0, 32)] });
+  providerServer = await rustProvider({ rpc: cfg.solanaRpc, program: cfg.programId, market: cfg.market, mint: cfg.usdcMint, image_checkpoint: imageCheckpoint, seed: [...provider.secretKey.slice(0, 32)] });
   catalog.models[0].offers[0].provider.endpoint = server.url.origin + "/v1/chat/completions";
   const account: Account = { walletId: "fixture-wallet", wallet: owner.publicKey.toString(), lane: lane.publicKey.toString(), name: "Fixture", apiUrl: server.url.origin, rpcUrl: server.url.origin + "/rpc", rpcWsUrl: server.url.origin.replace("http:", "ws:") + "/rpc", access: "fixture-access", refresh: "fixture-refresh", expires: Date.now() + 100000 };
   await store.save(account, { owner: [...owner.secretKey], lane: [...lane.secretKey], bookings: { [booking.publicKey.toString()]: [...booking.secretKey] } }, "fixture wallet passphrase");
@@ -426,6 +437,51 @@ providerTest("per-model routing modes constrain signed bookings to the selected 
       expect(f.bookData.readUInt32LE(352)).toBe(slot);
     }
     expect(f.submissions()).toBe(3);
+  } finally { await f.close(); }
+});
+
+providerTest("automatic output fits the remaining context and retries keep the signed body", async () => {
+  const f = await fixture();
+  try {
+    const model = f.catalog.models[0], offer = model.offers[0];
+    offer.contextTokens = offer.inputBoundTokens = 4096;
+    offer.outputTokens = 2048;
+    const messages = [{ role: "user", content: "a".repeat(2400) }];
+    const input = Buffer.byteLength(JSON.stringify(messages)) + 512;
+    const body = JSON.stringify({ model: model.id, messages, max_tokens: 2048 });
+    await f.client.refresh();
+    const signal = new AbortController().signal;
+    await expect(f.client.request("explicit", model.id, body, "", "primary", signal)).rejects.toMatchObject({ code: "TOKEN_LIMIT" });
+    const first = await f.client.request("auto", model.id, body, "", "primary", signal, {}, 2048);
+    expect(JSON.parse(first.body).max_tokens).toBe(4096 - input);
+    expect(first.headers.get("x-fossa-body-sha256")).toBe(createHash("sha256").update(first.body).digest("hex"));
+    expect((await f.client.request("auto", model.id, body, "", "primary", signal, {}, 2048)).body).toBe(first.body);
+    expect(f.submissions()).toBe(1);
+  } finally { await f.close(); }
+});
+
+providerTest("a published tokenizer admits a long chat and binds the measured input to the signed reservation", async () => {
+  const f = await fixture();
+  try {
+    const { exactTextCount } = await import("../src/inference/text-counter");
+    const bytes = readFileSync(new URL("./fixtures/text-counter.json", import.meta.url));
+    const ref = { format: "huggingface-chat-v1", url: "https://assets.example.org/counter.json", sha256: createHash("sha256").update(bytes).digest("hex") };
+    const model = f.catalog.models[0], offer = model.offers[0];
+    offer.contextTokens = offer.inputBoundTokens = 1024;
+    offer.outputTokens = 128;
+    const body = { model: model.id, messages: [{role: "user", content: "hello ".repeat(600)}], max_tokens: 128 };
+    await f.client.refresh();
+    const signal = new AbortController().signal;
+    await expect(f.client.request("before-counter", model.id, JSON.stringify(body), "", "primary", signal)).rejects.toMatchObject({code: "TOKEN_LIMIT"});
+    expect(await exactTextCount(ref, body, signal, async () => new Response(bytes))).toBe(602);
+    offer.textCounter = ref;
+    await f.client.refresh();
+    const result = await f.client.request("with-counter", model.id, JSON.stringify(body), "", "primary", signal);
+    expect(result.headers.get("x-fossa-text-counter")).toBe(ref.sha256);
+    const tx = Transaction.from(Buffer.from(f.store.pending(f.account.wallet)[0].transaction, "base64"));
+    const ix = tx.instructions.find(ix => Buffer.from(ix.data).subarray(0, 8).equals(discriminator("global:reserve_booking")))!;
+    expect(Buffer.from(ix.data).readUInt32LE(54)).toBe(602);
+    expect(f.submissions()).toBe(1);
   } finally { await f.close(); }
 });
 

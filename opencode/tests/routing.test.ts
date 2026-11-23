@@ -63,7 +63,7 @@ test("missing versions have no separate option and use the earliest published id
   const model = { offers: [unspecified, offers[1], latest] } as MarketModel;
   expect(modelCheckpoints(model).map(version => version.order)).toEqual([0, 1]);
   expect(eligible(model, defaultSettings)).toEqual([latest]);
-  expect(eligible(model, { ...defaultSettings, advancedRouting: true, modelCheckpoint: unspecified.checkpoint })).toEqual([unspecified, offers[1]]);
+  expect(eligible(model, { ...defaultSettings, advancedRouting: true, modelCheckpoint: unspecified.checkpoint })).toEqual([unspecified]);
   expect(modelCheckpoints({ offers: [unspecified] } as MarketModel)).toEqual([{ hash: unspecified.checkpoint, name: "Latest", order: 0 }]);
   expect(routingRequirements({ offers: [unspecified] } as MarketModel, defaultSettings).checkpoint).toBe(unspecified.checkpoint);
 });

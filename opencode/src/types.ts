@@ -25,16 +25,17 @@ export interface PublicConfig { providerLimitLookupTables?: string[];
   opencode: { deviceConnect?: boolean; manualImport?: boolean; siteUrl: string; deviceTtlSecs: number; maxInputTokens: number; maxRequestBytes: number; catalogMaxAgeMs: number; requestTimeoutMs: number; pollIntervalMs: number; mainnetGenesisHash: string; localBookingPoolSize: number };
 }
 export interface Offer {
-  maxImageTokens?: number | null; checkpoint: string; checkpointId: string; checkpointName: string; checkpointOrder: number | null; modalities: { input: string[]; output: string[] }; contextTokens: number; inputBoundTokens: number; outputTokens: number;
+  textCounter?: { format: string; url: string; sha256: string } | null; maxImageTokens?: number | null; checkpoint: string; checkpointId: string; checkpointName: string; checkpointOrder: number | null; modalities: { input: string[]; output: string[] }; contextTokens: number; inputBoundTokens: number; outputTokens: number;
   providerLimitId?: number | null;
   slot: number; provider: ProviderLimitState & { bookingLimits?: WalletBookingLimits | null; requestLimits?: RequestLimits | null; wallet: string; name: string; endpoint?: string }; inputRate: number; cachedRate: number; outputRate: number;
   speed: number; available: boolean; active: boolean; private: boolean; capacity: number; activeBookings: number;
 }
 export interface MarketModel {
+  inventory?: { context: number; output: number; modalities: { input: string[]; output: string[] }; price: Pick<Offer, "inputRate" | "cachedRate" | "outputRate"> | null };
   id: string; address: string; group?: string | null; name: string; terms: string; capacity: string; effort?: string[]; variants?: { id: string; body: { reasoning_effort: string } }[]; settings?: { maxTokens: number; temperature: number; topP: number }; offerCount: number; offers: Offer[];
   modalities: { input: string[]; output: string[] }; capabilities?: { tools: boolean; reasoning: boolean }; contextTokens?: number; outputTokens?: number; inputBoundTokens?: number;
 }
-export interface Catalog { providerLimitsEnabled?: boolean; providerLimitLookupTables?: string[]; listRoutingEnabled?: boolean; listRouting?: string; aliases?: Record<string, string>; providerListFeeBps?: number; providerListProtocolShareBps?: number; ready: boolean; slot: number; programId: string; market: string; providerList: string; models: MarketModel[] }
+export interface Catalog { directory?: boolean; providerLimitsEnabled?: boolean; providerLimitLookupTables?: string[]; listRoutingEnabled?: boolean; listRouting?: string; aliases?: Record<string, string>; providerListFeeBps?: number; providerListProtocolShareBps?: number; ready: boolean; slot: number; programId: string; market: string; providerList: string; models: MarketModel[] }
 export interface Chain { blockhash: string; lastValidBlockHeight: number; bookingRent: string; signatureFee: string; maxAgeMs: number }
 export interface TransactionFees { baselineMicroLamports: number; baselineFloorLamports: number; baselineCapLamports: number }
 export interface WalletState { transactionFees?: TransactionFees; providerWallet?: import("./inference/provider-wallet").ProviderWalletSnapshot | null; wallet: string; lane: string; vault: string; source: string; ready: boolean; lamports: string; usdcAtomic: string; freeAtomic: string; generation: string; bookings: { address: string; status: number; generation: string; rentPayer: string }[]; slot: number }
