@@ -18,6 +18,7 @@ export const Fossa = Rpc.define({
     settings: { input: object, output: object, errors },
     model: { input: { type: "object", properties: { model: { type: "string" } }, required: ["model"], additionalProperties: false }, output: object, errors },
     recover: { input: empty, output: object, errors },
+    bookingPool: { input: { type: "object", properties: { target: { type: "integer", minimum: 1, maximum: 64 }, wallet: { type: "string" }, maxRentLamports: { type: "string" } }, additionalProperties: false }, output: object, errors },
     rakeback: { input: object, output: object, errors },
   },
   events: { updated: { schema: object }, unlockRequired: { schema: object } },

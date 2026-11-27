@@ -27,7 +27,9 @@ async function fixture(customError = 2, retries = 0, scoped = false, imageCheckp
   const tokenData = Buffer.alloc(165); Buffer.from(mint.toBytes()).copy(tokenData); Buffer.from(owner.publicKey.toBytes()).copy(tokenData, 32); tokenData.writeBigUInt64LE(10_000_000n, 64);
   const modelData = Buffer.alloc(176); modelData.set(discriminator("account:Model")); Buffer.from(market.toBytes()).copy(modelData, 8);
   let signature = "", submitted = 0, lostFirst = false, hideStatus = false, catalogReads = 0;
+  let walletLamports = 1_000_000, walletRentMinimum = 1000;
   const confirmedSignatures = new Set<string>();
+  const arrivals: number[] = [];
   const deleted = (await Keypair.generate()).publicKey.toString(), failures = new Set<string>();
   type SocketData = { subscribed: boolean; live?: boolean; watch?: string };
   const sockets = new Set<import("bun").ServerWebSocket<SocketData>>();
@@ -54,6 +56,7 @@ async function fixture(customError = 2, retries = 0, scoped = false, imageCheckp
     },
   }, async fetch(request, server) {
     const url = new URL(request.url), json = (value: unknown) => Response.json(value);
+    if (url.pathname === "/v1/chat/completions") arrivals.push(performance.now());
     if (url.pathname === "/rpc" && request.method === "GET" && server.upgrade(request, { data: { subscribed: false } })) return;
     if (url.pathname === "/v1/opencode/live" && server.upgrade(request, { data: { subscribed: false, live: true } })) return;
     if (metadataHash && url.pathname === `/v1/market/metadata/${metadataHash}`) return new Response(imageMetadata);
@@ -70,7 +73,7 @@ async function fixture(customError = 2, retries = 0, scoped = false, imageCheckp
     const body = await request.json() as { id: unknown; method: string; params: any[] }; let result: unknown;
     if (body.method === "getGenesisHash") result = "fixture-mainnet-genesis";
     else if (body.method === "getLatestBlockhash") result = { context: { slot: 100 }, value: { blockhash: (await Keypair.generate()).publicKey.toString(), lastValidBlockHeight: 500 } };
-    else if (body.method === "getMinimumBalanceForRentExemption") result = 1000;
+    else if (body.method === "getMinimumBalanceForRentExemption") result = body.params[0] === 0 ? walletRentMinimum : 1000;
     else if (body.method === "getFeeForMessage") result = { context: { slot: 100 }, value: 5000 };
     else if (body.method === "getBlockHeight") result = 100;
     else if (body.method === "simulateTransaction") {
@@ -89,7 +92,7 @@ async function fixture(customError = 2, retries = 0, scoped = false, imageCheckp
       result = { context: { slot: 100 }, value: [...records].filter(([, value]) => value.owner.toString() === body.params[0] && options.filters.every((filter: { dataSize?: number; memcmp?: { offset: number; bytes: string } }) => filter.dataSize === undefined ? filter.memcmp && value.data.subarray(filter.memcmp.offset, filter.memcmp.offset + bs58.decode(filter.memcmp.bytes).length).equals(bs58.decode(filter.memcmp.bytes)) : value.data.length === filter.dataSize)).map(([pubkey, value]) => ({ pubkey, account: { data: [value.data.toString("base64"), "base64"], owner: value.owner.toString(), lamports: 1000, executable: false, rentEpoch: 0 } })) };
     }
     else if (body.method === "getMultipleAccounts") result = { context: { slot: 100 }, value: body.params[0].map((address: string) => {
-      const value = records.get(address); if (!value) return address === owner.publicKey.toString() ? { data: ["", "base64"], owner: "11111111111111111111111111111111", lamports: 1_000_000, executable: false, rentEpoch: 0 } : null;
+      const value = records.get(address); if (!value) return address === owner.publicKey.toString() ? { data: ["", "base64"], owner: "11111111111111111111111111111111", lamports: walletLamports, executable: false, rentEpoch: 0 } : null;
       return { data: [value.data.toString("base64"), "base64"], owner: value.owner.toString(), lamports: 1000, executable: false, rentEpoch: 0 };
     }) };
     else if (body.method === "getAccountInfo") { const value = records.get(body.params[0]); result = { context: { slot: 100 }, value: value ? { data: [value.data.toString("base64"), "base64"], owner: value.owner.toString(), lamports: 1000, executable: false, rentEpoch: 0 } : null }; }
@@ -100,6 +103,19 @@ async function fixture(customError = 2, retries = 0, scoped = false, imageCheckp
       if (confirmedSignatures.has(signature)) return json({ jsonrpc: "2.0", id: body.id, result: signature });
       confirmedSignatures.add(signature);
       submitted++;
+      const slots = tx.instructions.filter(ix => ix.programId.equals(program) && Buffer.from(ix.data).equals(discriminator("global:initialize_receipt")));
+      if (slots.length) {
+        expect(slots.length).toBeLessThanOrEqual(6);
+        for (const ix of slots) {
+          const address = ix.keys[4].pubkey.toString();
+          expect(ix.keys[4].isSigner).toBe(true);
+          expect(records.has(address)).toBe(false);
+          const data = Buffer.from(bookData);
+          data[148] = 5; data.writeBigUInt64LE(0n, 152);
+          records.set(address, { data, owner: program });
+        }
+        return json({ jsonrpc: "2.0", id: body.id, result: signature });
+      }
       const instruction = tx.instructions.find(value => value.programId.equals(program) && ["global:reserve_booking", "global:reserve_list_booking"].some(name => Buffer.from(value.data).subarray(0, 8).equals(discriminator(name))))!;
       if (instruction.keys[6].pubkey.toString() === deleted) { failures.add(signature); return json({ jsonrpc: "2.0", id: body.id, result: signature }); }
       expect(instruction.data.length).toBe(scoped ? 168 : 163);
@@ -164,7 +180,8 @@ async function fixture(customError = 2, retries = 0, scoped = false, imageCheckp
   for (let attempt = 0; attempt < 100 && !client["chain"]; attempt++) await Bun.sleep(5);
   expect(client["chain"]).toBeDefined();
   return { client, store, account, provider, owner, bookData, tokenData, modelData, cfg, catalog,
-    catalogReads: () => catalogReads,
+    setWalletSol: (balance: number, minimum: number) => { walletLamports = balance; walletRentMinimum = minimum; },
+    catalogReads: () => catalogReads, arrivals,
     publish: (value: unknown) => { for (const socket of sockets) if (socket.data.live) socket.send(JSON.stringify(value)); },
     publishCatalog: () => { for (const socket of sockets) if (socket.data.live) socket.send(JSON.stringify({ type: "catalog", data: catalog })); },
     addBooking: async () => { const address = (await Keypair.generate()).publicKey.toString(), data = Buffer.from(bookData); data[148] = 5; data.writeBigUInt64LE(0n, 152); records.set(address, { data, owner: program }); client.wallet!.bookings.push({ address, status: 5, generation: "0", rentPayer: owner.publicKey.toString() }); return address; },
@@ -172,6 +189,95 @@ async function fixture(customError = 2, retries = 0, scoped = false, imageCheckp
     closeBooking: () => { for (const socket of sockets) if (socket.data.live) socket.send(JSON.stringify({ type: "booking", address: booking.publicKey.toString(), data: { owner: null, data: null, slot: 101, version: 1 } })); },
     submissions: () => submitted, hideStatus: () => { hideStatus = true; }, loseResponse: () => { lostFirst = true; }, close: async () => { client.stop(); await providerServer.close(); await Bun.sleep(600); store.close(); server.stop(true); providerStream.stop(true); owner.secretKey.fill(0); provider.secretKey.fill(0); rmSync(directory, { recursive: true, force: true }); } };
 }
+
+for (const count of [3, 30, 50]) providerTest(`a prepared wallet dispatches ${count} simultaneous requests on distinct slots`, async () => {
+  const f = await fixture();
+  try {
+    const pool = await f.client.configureBookingPool(count);
+    expect(pool).toMatchObject({ slots: count, target: count });
+    const setupTransactions = Math.ceil((count - 1) / 6);
+    expect(f.submissions()).toBe(setupTransactions);
+    await f.client.configureBookingPool(count);
+    expect(f.submissions()).toBe(setupTransactions);
+    const model = f.catalog.models[0], signal = new AbortController().signal;
+    model.offers[0].capacity = count;
+    const body = JSON.stringify({ model: model.id, messages: [{ role: "user", content: "Hello" }], max_tokens: 16 });
+    const start = performance.now();
+    const bookings = await Promise.all(Array.from({ length: count }, async (_, i) => {
+      const id = `burst-${i}`;
+      const request = await f.client.request(id, model.id, body, id, "primary", signal);
+      f.client.dispatched(id, Date.now());
+      const outbound = new Request(request.url, { method: "POST", headers: request.headers, body: request.body });
+      const response = await fetch(outbound);
+      expect(response.status).toBe(200);
+      await f.client.response(outbound, response).text();
+      return request.headers.get("x-fossa-booking");
+    }));
+    expect(new Set(bookings).size).toBe(count);
+    expect(f.submissions()).toBe(setupTransactions + count);
+    const generations = f.store.pending(f.account.wallet).filter(row => row.kind === "inference").map(row => Number(row.generation)).sort((a, b) => a - b);
+    expect(generations).toEqual(Array.from({ length: count }, (_, i) => i + 1));
+    const dispatch = f.arrivals.map(at => Math.round(at - start));
+    expect(dispatch).toHaveLength(count);
+    if (process.env.FOSSA_BURST_TIMINGS) console.log(JSON.stringify({ count, firstMs: dispatch[0], p50Ms: dispatch[Math.ceil(count / 2) - 1], lastMs: dispatch.at(-1) }));
+    expect(await f.client.configureBookingPool(1)).toMatchObject({ slots: count, target: 1 });
+    expect(f.client["availableWallet"]().bookings).toHaveLength(0);
+    expect(f.submissions()).toBe(setupTransactions + count);
+  } finally { await f.close(); }
+}, 30_000);
+
+providerTest("an underfunded increase from 10 to 20 slots submits no setup transactions", async () => {
+  const f = await fixture();
+  try {
+    for (let i = 1; i < 10; i++) await f.addBooking();
+    await f.client.configureBookingPool(10);
+    f.client.chain!.bookingRent = "3291840";
+    for (const balance of [29_212_883, 10 * 3_291_840 + 60_000, 10 * 3_291_840 + 650_240]) {
+      f.setWalletSol(balance, 650_240);
+      await expect(f.client.configureBookingPool(20)).rejects.toThrow(/To reach 20 booking slots, add .* SOL or choose fewer slots/);
+      expect(f.submissions()).toBe(0);
+      expect(await f.client.bookingPool()).toMatchObject({ target: 10, slots: 10 });
+    }
+  } finally { await f.close(); }
+});
+
+providerTest("slot setup resumes a partial batch without recreating accounts or changing wallet protection", async () => {
+  const f = await fixture();
+  try {
+    const journal = f.client["journal"].bind(f.client);
+    await expect(f.client.configureBookingPool(12, 0n)).rejects.toThrow("Review the new rent");
+    expect(f.submissions()).toBe(0);
+    let batches = 0;
+    f.client["journal"] = (...args) => ++batches === 2 ? Promise.reject(Error("fixture interrupted")) : journal(...args);
+    await expect(f.client.configureBookingPool(12)).rejects.toThrow("Confirmed 7 of 12 booking slots. Retrying reuses existing slots. fixture interrupted");
+    expect(f.submissions()).toBe(1);
+    f.client["journal"] = journal;
+    expect(await f.client.configureBookingPool(12)).toMatchObject({ target: 12, slots: 12 });
+    expect(f.submissions()).toBe(2);
+    expect(f.store.security(f.account.walletId).protected).toBe(true);
+    await expect(f.client.configureBookingPool(65)).rejects.toThrow("1 and 64");
+  } finally { await f.close(); }
+});
+
+providerTest("cancelling queued requests leaves the wallet available for another operation", async () => {
+  const f = await fixture();
+  try {
+    f.bookData[148] = 0;
+    f.client.wallet = await f.client.snapshot();
+    const model = f.catalog.models[0].id;
+    const body = JSON.stringify({ model, messages: [{ role: "user", content: "Hi" }], max_tokens: 16 });
+    const head = new AbortController(), other = new AbortController();
+    const first = f.client.request("waiting", model, body, "", "primary", head.signal);
+    const second = f.client.request("cancelled-waiter", model, body, "", "primary", other.signal);
+    const deadline = Date.now() + 1500;
+    while (!f.client["walletWaiters"].size && Date.now() < deadline) await Bun.sleep(1);
+    expect(f.client["walletWaiters"].size).toBe(1);
+    await f.store.exclusive(f.account.wallet, async () => {});
+    other.abort(Error("second cancelled")); await expect(second).rejects.toThrow("second cancelled");
+    head.abort(Error("first cancelled")); await expect(first).rejects.toThrow("first cancelled");
+    expect(f.submissions()).toBe(0);
+  } finally { await f.close(); }
+});
 
 providerTest("shared model group remains in the signed native reservation", async () => {
   const f = await fixture();
@@ -664,6 +770,7 @@ providerTest("confirmed receipt wakes booking reuse and records consecutive requ
     const waiting = Date.now() + 1000;
     while (!f.client["walletWaiters"].size && Date.now() < waiting) await Bun.sleep(1);
     expect(f.client["walletWaiters"].size).toBe(1);
+    expect(f.store.db.query("SELECT count(*) AS n FROM locks").get()).toEqual({ n: 0 });
     f.bookData[148] = 5;
     f.publish({ type: "wallet", data: await f.client.snapshot() });
     const receipt = { owner: f.account.wallet, provider: f.provider.publicKey.toString(), booking: first.booking, generation: first.generation, charge: "1", slot: 100 };

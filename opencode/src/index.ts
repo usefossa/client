@@ -221,6 +221,12 @@ export default Plugin.define({
         }
         return store.security(value.account.walletId);
       }),
+      bookingPool: guarded(async input => {
+        const value = await requireClient(), { target, wallet, maxRentLamports } = input as { target?: number; wallet?: string; maxRentLamports?: string };
+        if (target === undefined) return value.bookingPool();
+        if (wallet !== value.account.wallet || !maxRentLamports || !/^\d{1,20}$/.test(maxRentLamports)) throw Error("Review booking slot rent for the active wallet first.");
+        return value.configureBookingPool(target, BigInt(maxRentLamports));
+      }),
       settings: guarded(async input => {
         const { model: requestedId, ...patch } = input as Record<string, unknown>;
         const modelId = typeof requestedId === "string" ? catalog?.aliases?.[requestedId] ?? requestedId : requestedId;

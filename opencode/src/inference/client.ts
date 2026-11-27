@@ -1,3 +1,4 @@
+import { BookingQueue } from "./queue";
 import { exactTextCount } from "./text-counter";
 import { bookingLookupTables, compileBookingTransaction } from "./booking-transaction";
 import { createHash, randomUUID } from "node:crypto";
@@ -24,6 +25,9 @@ const meta = (pubkey: PublicKey, isWritable = false, isSigner = false) => ({ pub
 const discriminator = (name: string) => createHash("sha256").update(name).digest().subarray(0, 8);
 const ix = (programId: PublicKey, name: string, data: Buffer, keys: ReturnType<typeof meta>[]) => new TransactionInstruction({ programId, data: Buffer.concat([discriminator(`global:${name}`), data]), keys });
 const terminal = new Set(["settled", "released", "failed", "expired"]);
+// six slot signers and the wallet fit in one legacy transaction.
+const slotsPerTransaction = 6;
+const bookingSlotTimeout = () => new FossaError("BOOKING_POOL_BUSY", "Timed out waiting for a booking slot. Retry after another request finishes, or increase your slot count in Fossa Settings → Booking slots.");
 const validSlot = (value: unknown) => typeof value === "bigint" ? value >= 0n && value <= BigInt(Number.MAX_SAFE_INTEGER) : typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 const LiveSocket = WebSocket as typeof WebSocket & { new(url: URL, options: Bun.WebSocketOptions): WebSocket };
 
@@ -37,10 +41,14 @@ export class FossaClient {
   private walletAddresses?: Promise<{ source: string; vault: string }>;
   private feeVersion = 0;
   private catalogWaiters = new Set<() => void>();
+  private bookingQueue = new BookingQueue();
+  private readonly closing = new AbortController();
+  private walletVersion = 0;
   private walletWaiters = new Set<() => void>();
   private catalogVersion = 0;
   private bookVersion = 0;
   private books = new Map<string, { version: number; catalog: Catalog }>();
+  private loadingBooks = new Map<string, { version: number; promise: Promise<Catalog> }>();
   private watchers = new Map<string, (info: AccountInfo<Uint8Array> | null, slot: number, source?: "stream" | "rpc") => void>();
   private broadcasts = new Set<string>();
   private rakebackTimer?: ReturnType<typeof setInterval>;
@@ -119,12 +127,27 @@ export class FossaClient {
     })().finally(() => { this.refreshing = undefined; });
   }
   async modelBook(id: string, signal?: AbortSignal) {
+    signal?.throwIfAborted();
     const directory = this.catalog;
     if (!directory?.directory) return directory;
     const cached = this.books.get(id);
     if (cached?.version === this.bookVersion) return cached.catalog;
     const version = this.bookVersion;
-    const book = await api<Catalog>(this.account.apiUrl, `/market/catalog?model=${encodeURIComponent(id)}`, { signal });
+    let loading = this.loadingBooks.get(id);
+    if (loading?.version !== version) {
+      const promise = this.loadBook(id, directory, version).finally(() => { if (this.loadingBooks.get(id)?.promise === promise) this.loadingBooks.delete(id); });
+      this.loadingBooks.set(id, loading = { version, promise });
+    }
+    if (!signal) return loading.promise;
+    const shared = loading.promise;
+    return new Promise<Catalog>((resolve, reject) => {
+      const abort = () => reject(signal.reason);
+      signal.addEventListener("abort", abort, { once: true });
+      shared.then(resolve, reject).finally(() => signal.removeEventListener("abort", abort));
+    });
+  }
+  private async loadBook(id: string, directory: Catalog, version: number) {
+    const book = await api<Catalog>(this.account.apiUrl, `/market/catalog?model=${encodeURIComponent(id)}`, { signal: this.closing.signal });
     if (book.programId !== this.cfg.programId || book.market !== this.cfg.market || book.providerList !== this.cfg.providerList ||
       !book.ready || !Number.isSafeInteger(book.slot) || book.slot < (this.catalog?.slot ?? directory.slot) || !Array.isArray(book.models) ||
       book.models.length > 1 || book.models.some(model => model.id !== id || !Array.isArray(model.offers))) {
@@ -142,7 +165,7 @@ export class FossaClient {
     this.books.clear();
     for (const wake of this.catalogWaiters) wake();
   }
-  private wakeWallet() { for (const wake of this.walletWaiters) wake(); }
+  private wakeWallet() { this.walletVersion++; for (const wake of this.walletWaiters) wake(); }
   private receipt(value: unknown) {
     const receipt = value as { owner?: string; provider?: string; booking?: string; generation?: string; charge?: string; slot?: number } | null;
     if (!receipt || receipt.owner !== this.account.wallet || typeof receipt.charge !== "string" || !/^\d{1,20}$/.test(receipt.charge) || !Number.isSafeInteger(receipt.slot) || receipt.slot! < 0) return;
@@ -165,7 +188,7 @@ export class FossaClient {
     });
   }
   async snapshot(minSlot = 0, forceRpc = false): Promise<WalletState> {
-    const pool = new Set([...(this.wallet?.bookings ?? []).map(item => item.address), ...Object.keys(this.store.unlocked(this.account.walletId) ? this.store.secrets(this.account.walletId).bookings : {})]);
+    const pool = new Set([...(this.wallet?.bookings ?? []).map(item => item.address), ...this.store.bookingPool(this.account.walletId).addresses, ...Object.keys(this.store.unlocked(this.account.walletId) ? this.store.secrets(this.account.walletId).bookings : {})]);
     if (!this.account.rpcUrl && !forceRpc) {
       const snapshot = await this.validateSnapshot(await api<WalletState>(this.account.apiUrl, "/opencode/wallet", { token: this.account.access }));
       this.acceptFees(snapshot.transactionFees);
@@ -203,6 +226,11 @@ export class FossaClient {
     return snapshot;
   }
   private get scope() { return this.cfg ? { program: this.cfg.programId, market: this.cfg.market, lane: this.account.lane, genesis: this.cfg.opencode.mainnetGenesisHash, mint: this.cfg.usdcMint } : undefined; }
+  private requireLiveWallet() {
+    if (this.socket?.readyState !== WebSocket.OPEN || Date.now() - this.walletAt > this.cfg.opencode.catalogMaxAgeMs) throw new FossaError("WALLET_SYNCING", "Live wallet data is synchronizing. Try again shortly.");
+    if (!this.catalog?.ready || Date.now() - this.catalogAt > this.cfg.opencode.catalogMaxAgeMs) throw new FossaError("CATALOG_STALE", "Fossa catalog is synchronizing. No payment submitted.");
+    this.quote();
+  }
   private rows(active = false) { return this.store.pending(this.account.wallet, this.scope, active); }
   private localRequest(id: string) { return this.store.request(id, this.account.wallet, this.scope); }
   private quote() {
@@ -242,7 +270,9 @@ export class FossaClient {
       if (!scope && BigInt(row.generation) > generation) generation = BigInt(row.generation);
     }
     const occupied = new Set([...this.rows(true), ...rows.filter(sameLane)].filter(row => row.kind === "inference").map(row => row.booking));
-    return { ...wallet, usdcAtomic: String(usdc > 0n ? usdc : 0n), freeAtomic: String(free > 0n ? free : 0n), lamports: String(lamports > 0n ? lamports : 0n), generation: String(generation), bookings: wallet.bookings.filter(booking => !occupied.has(booking.address)) };
+    const target = this.store.bookingPool(this.account.walletId).target;
+    const atCapacity = target !== undefined && wallet.bookings.filter(booking => booking.status !== 5 || occupied.has(booking.address)).length >= target;
+    return { ...wallet, usdcAtomic: String(usdc > 0n ? usdc : 0n), freeAtomic: String(free > 0n ? free : 0n), lamports: String(lamports > 0n ? lamports : 0n), generation: String(generation), bookings: atCapacity ? [] : wallet.bookings.filter(booking => !occupied.has(booking.address)) };
   }
   private broadcast(row: Pending) {
     if (this.broadcasts.has(row.id) || this.stopped) return;
@@ -375,7 +405,12 @@ export class FossaClient {
     const row: Pending = { ...fields, scope: this.scope, source: this.wallet?.source, rentLamports: String(rent), ...(fields.kind === "inference" ? { dispatchStarted: false } : {}), feeLamports: cost.toString(), prepareMs: fields.startedAt === undefined ? undefined : Date.now() - fields.startedAt, signature: bs58.encode(transaction.signatures[0]), transaction: Buffer.from(transaction.serialize()).toString("base64"), expiry: quote.lastValidBlockHeight, stage: "prepared", created: Date.now() };
     this.submit(row); return row;
   }
-  private async setup(owner: Keypair, signal?: AbortSignal) {
+  private async walletSetupRent() {
+    if (this.wallet?.ready) return 0n;
+    const [lane, vault] = await Promise.all([this.rpc.getMinimumBalanceForRentExemption(128), this.rpc.getMinimumBalanceForRentExemption(165)]);
+    return BigInt(lane) + BigInt(vault);
+  }
+  private async setup(owner: Keypair, signal?: AbortSignal, initializeSlots = true, quotedWalletRent?: bigint) {
     if (!this.wallet) throw Error("Wallet unavailable.");
     if (this.wallet.ready && this.wallet.bookings.length) return;
     const secrets = this.store.secrets(this.account.walletId), program = new PublicKey(this.cfg.programId), market = new PublicKey(this.cfg.market), lane = new PublicKey(this.account.lane), mint = new PublicKey(this.cfg.usdcMint);
@@ -383,16 +418,97 @@ export class FossaClient {
     if (!this.wallet.ready) {
       if (!secrets.lane) throw new FossaError("ACCOUNT_PREPARING", "Fossa is preparing your website wallet accounts. Wait briefly, then try again.");
       const laneSigner = await Keypair.fromSecretKey(Uint8Array.from(secrets.lane));
-      const [rent, tokenRent] = await Promise.all([this.rpc.getMinimumBalanceForRentExemption(128), this.rpc.getMinimumBalanceForRentExemption(165)]);
+      const rent = quotedWalletRent ?? await this.walletSetupRent();
       const tx = new Transaction().add(createAssociatedTokenAccountIdempotentInstruction(owner.publicKey, vault, authority, mint), ix(program, "initialize_user", Buffer.alloc(0), [meta(owner.publicKey, true, true), meta(market), meta(lane, true, true), meta(authority), meta(vault), meta(SystemProgram.programId)]));
-      try { const row = await this.journal(tx, [owner, laneSigner], { id: randomUUID(), wallet: this.account.wallet, model: "", bodyHash: "", session: "", kind: "setup", booking: "", generation: "0", reserve: "0" }, rent + tokenRent, signal); const slot = await this.processed(row); row.processedSlot = slot; row.stage = "settled"; this.store.put(row); this.wallet = await this.snapshot(slot); } finally { laneSigner.secretKey.fill(0); }
+      try { const row = await this.journal(tx, [owner, laneSigner], { id: randomUUID(), wallet: this.account.wallet, model: "", bodyHash: "", session: "", kind: "setup", booking: "", generation: "0", reserve: "0" }, rent, signal); const slot = await this.processed(row); row.processedSlot = slot; row.stage = "settled"; this.store.put(row); this.wallet = await this.snapshot(slot); } finally { laneSigner.secretKey.fill(0); }
     }
+    if (!initializeSlots) return;
     for (const [address, bytes] of Object.entries(secrets.bookings)) {
       if (this.wallet.bookings.some(value => value.address === address)) continue;
       const quote = this.quote(), rent = BigInt(quote.bookingRent), booking = await Keypair.fromSecretKey(Uint8Array.from(bytes));
       const tx = new Transaction().add(ix(program, "initialize_receipt", Buffer.alloc(0), [meta(market), meta(lane), meta(owner.publicKey, false, true), meta(owner.publicKey, true, true), meta(booking.publicKey, true, true), meta(SystemProgram.programId)]));
       try { const row = await this.journal(tx, [owner, booking], { id: randomUUID(), wallet: this.account.wallet, model: "", bodyHash: "", session: "", kind: "setup", booking: address, generation: "0", reserve: "0" }, rent, signal); const slot = await this.processed(row); row.processedSlot = slot; row.stage = "settled"; this.store.put(row); this.wallet = await this.snapshot(slot); } finally { booking.secretKey.fill(0); }
     }
+  }
+  async bookingPool() {
+    const slots = this.wallet?.bookings.length ?? 0;
+    return { wallet: this.account.wallet, slots, target: this.store.bookingPool(this.account.walletId).target ?? (slots || this.cfg.opencode.localBookingPoolSize), rentLamports: this.quote().bookingRent, walletRentLamports: String(await this.walletSetupRent()) };
+  }
+  private async checkPoolFunding(target: number, missing: number, rent: bigint) {
+    const walletSetup = this.wallet!.ready ? 0 : 1;
+    const batches = Math.ceil(missing / slotsPerTransaction) + walletSetup;
+    if (!batches) return;
+    const [minimumBalance, priority] = await Promise.all([this.rpc.getMinimumBalanceForRentExemption(0), this.priority(1_400_000)]);
+    const signatures = missing + batches + walletSetup;
+    // at the compute limit, rounding the per-unit price can add up to two lamports.
+    const fees = BigInt(signatures) * BigInt(this.quote().signatureFee) + BigInt(batches) * (priority.lamports + 2n);
+    const required = rent + fees + BigInt(minimumBalance), available = BigInt(this.availableWallet().lamports);
+    if (available < required) {
+      const shortfall = required - available;
+      throw new FossaError("SOL_REQUIRED", `To reach ${target} booking slots, add ${atomic(shortfall, 9)} SOL or choose fewer slots. This covers rent, estimated fees, and the wallet’s minimum balance.`, { requiredLamports: String(required), shortfallLamports: String(shortfall) });
+    }
+  }
+  async configureBookingPool(target: number, maxRent?: bigint) {
+    if (!Number.isInteger(target) || target < 1 || target > 64) throw new FossaError("CONFIGURATION", "Choose between 1 and 64 booking slots.");
+    return this.store.exclusive(this.account.wallet, async () => {
+      await this.adoptLegacy(); this.assertJournalScope();
+      if (this.rows(true).some(row => ["prepared", "sent", "uncertain"].includes(row.stage))) {
+        await this.reconcile(true);
+        if (this.rows(true).some(row => ["prepared", "sent", "uncertain"].includes(row.stage))) throw new FossaError("RECOVERY_PENDING", "Recover the pending transaction before changing booking slots.");
+      }
+      const id = this.account.walletId, pool = this.store.bookingPool(id), secrets = this.store.secrets(id);
+      const owner = await Keypair.fromSecretKey(Uint8Array.from(secrets.owner));
+      let confirmedSlots: number | undefined;
+      try {
+        this.wallet = await this.snapshot();
+        const known = new Set(this.wallet!.bookings.map(item => item.address));
+        const walletRent = await this.walletSetupRent();
+        let spentRent = walletRent;
+        const checkRent = (additional: bigint) => {
+          if (maxRent !== undefined && spentRent + additional > maxRent) throw new FossaError("QUOTE_CHANGED", "Wallet setup costs changed. Review the new rent in Booking slots.");
+        };
+        const missing = Math.max(0, target - known.size), slotRent = BigInt(missing) * BigInt(this.quote().bookingRent);
+        checkRent(slotRent);
+        await this.checkPoolFunding(target, missing, walletRent + slotRent);
+        await this.setup(owner, undefined, false, walletRent);
+        const original = Object.entries(secrets.bookings).filter(([address]) => !known.has(address));
+        const program = new PublicKey(this.cfg.programId), market = new PublicKey(this.cfg.market), lane = new PublicKey(this.account.lane);
+        let index = 0;
+        while (known.size < target) {
+          const tx = new Transaction(), signers = [owner];
+          try {
+            while (signers.length <= slotsPerTransaction && known.size + signers.length - 1 < target) {
+              const legacy = original.shift();
+              const booking = legacy ? await Keypair.fromSecretKey(Uint8Array.from(legacy[1])) : await Keypair.fromSeed(createHash("sha256").update(owner.secretKey.subarray(0, 32)).update(`fossa-opencode-pool:${this.cfg.market}:${this.account.lane}:${index++}`).digest());
+              const address = booking.publicKey.toBase58();
+              if (known.has(address)) { booking.secretKey.fill(0); continue; }
+              if (!legacy && !pool.addresses.includes(address)) pool.addresses.push(address);
+              signers.push(booking);
+              tx.add(ix(program, "initialize_receipt", Buffer.alloc(0), [meta(market), meta(lane), meta(owner.publicKey, false, true), meta(owner.publicKey, true, true), meta(booking.publicKey, true, true), meta(SystemProgram.programId)]));
+            }
+            this.store.saveBookingPool(id, pool);
+            const rent = BigInt(this.quote().bookingRent) * BigInt(signers.length - 1);
+            checkRent(rent);
+            const row = await this.journal(tx, signers, { id: randomUUID(), wallet: this.account.wallet, model: "", bodyHash: "", session: "", kind: "setup", booking: signers[1].publicKey.toString(), generation: "0", reserve: "0" }, rent);
+            row.processedSlot = await this.processed(row); row.stage = "settled"; this.store.put(row);
+            confirmedSlots = known.size + signers.length - 1;
+            spentRent += rent;
+            this.wallet = await this.snapshot(row.processedSlot);
+            for (const key of signers.slice(1)) {
+              const address = key.publicKey.toString();
+              if (!this.wallet.bookings.some(slot => slot.address === address)) throw new FossaError("WALLET_SYNCING", "Booking slots are synchronizing. Reopen the setting to continue.");
+              known.add(address);
+            }
+          } finally { for (const key of signers.slice(1)) key.secretKey.fill(0); }
+        }
+        this.store.saveBookingPool(id, { ...pool, target });
+        this.wakeWallet();
+        return this.bookingPool();
+      } catch (error) {
+        if (confirmedSlots === undefined) throw error;
+        throw new FossaError(error instanceof FossaError ? error.code : "SLOT_SETUP_INTERRUPTED", `Confirmed ${confirmedSlots} of ${target} booking slots. Retrying reuses existing slots. ${error instanceof Error ? error.message : "Setup was interrupted."}`, error instanceof FossaError ? error.data : undefined);
+      } finally { owner.secretKey.fill(0); }
+    });
   }
   private inspect(info: AccountInfo<Uint8Array>, row: Pending, model: Pick<MarketModel, "address">) {
     const data = Buffer.from(info.data);
@@ -553,8 +669,110 @@ export class FossaClient {
       if (previous.provider && previous.endpoint) return this.authorize(previous, previous.automaticOutput === undefined ? body : JSON.stringify({ ...JSON.parse(body), max_tokens: previous.automaticOutput }));
       throw new FossaError("SUBMISSION_UNCERTAIN", "Existing booking is unresolved. Use /fossa to recover it.");
     }
-    return this.store.exclusive(this.account.wallet, async () => {
-      const walletLockMs = Date.now() - startedAt;
+    this.requireLiveWallet();
+    let book = (await this.modelBook(modelId, signal))!;
+    let model = book.models.find(model => model.id === modelId);
+    if (!model) throw new FossaError("MODEL_UNAVAILABLE", "Selected Fossa model is unavailable.");
+    const parsed = JSON.parse(body) as { messages: unknown[]; tools?: unknown[]; response_format?: unknown; max_tokens?: number; max_completion_tokens?: number };
+    const settings = this.settings(modelId), requirements = routingRequirements(model, settings);
+    if (!requirements.checkpoint || !model.offers.some(offer => offer.active && offer.checkpoint === requirements.checkpoint)) throw new FossaError("NO_PROVIDER", "No provider matches this model’s published version.");
+    const explicitOutput = hostOutputLimit === undefined ? parsed.max_tokens ?? parsed.max_completion_tokens : undefined;
+    const configuredOutput = settings.advancedRouting ? settings.maxOutputTokens : null;
+    const minimumOutput = configuredOutput ?? explicitOutput ?? 1;
+    const inspected = inspectInput(parsed), { inlineBytes, imageCount } = inspected;
+    const checkpointOffers = model.offers.filter(offer => offer.active && offer.checkpoint === requirements.checkpoint);
+    const ref = checkpointOffers[0]?.textCounter;
+    const exact = !imageCount && ref && checkpointOffers.every(offer => offer.textCounter?.sha256 === ref.sha256)
+      ? await exactTextCount(ref, parsed, signal, request => providerFetch(request, this.account.apiUrl)) : undefined;
+    if (exact !== undefined) requirements.allowUnversioned = false;
+    const textBound = exact ?? inspected.textBound;
+    let imageLimit: number | undefined;
+    if (imageCount) {
+      requirements.inputModalities |= 2;
+      const compatible = model.offers.filter(offer => offer.active && offerFits(offer, requirements) && offer.maxImageTokens != null);
+      if (!compatible.length) throw new FossaError("NO_PROVIDER", "No eligible checkpoint has a published image token limit.");
+      const available = new Set(eligible(model, settings, 0, minimumOutput, requirements));
+      const viable = compatible.filter(offer => {
+        const bound = textBound + imageAllowance(imageCount, offer.maxImageTokens);
+        const input = settings.advancedRouting ? settings.maxInputTokens ?? bound : bound;
+        return bound <= input && input <= this.cfg.opencode.maxInputTokens && offerFits(offer, requirements, input, minimumOutput);
+      });
+      const ready = viable.filter(offer => available.has(offer));
+      const selected = rankOffers(ready.length ? ready : viable, settings)[0] ?? compatible[0];
+      requirements.checkpoint = selected.checkpoint;
+      requirements.allowUnversioned = false;
+      imageLimit = selected.maxImageTokens!;
+    }
+    const candidates = model.offers.filter(offer => offer.active && offerFits(offer, requirements));
+    if (imageCount && candidates.some(offer => offer.maxImageTokens !== imageLimit)) throw new FossaError("CONFIGURATION", "Catalog has inconsistent image token limits.");
+    const context = Math.max(0, ...candidates.map(offer => offer.contextTokens)), inputCap = Math.max(0, ...candidates.map(offer => offer.inputBoundTokens)), outputCap = Math.max(0, ...candidates.map(offer => offer.outputTokens));
+    const imageTokens = imageAllowance(imageCount, imageLimit), requiredInput = textBound + imageTokens;
+    const maxInput = settings.advancedRouting && settings.maxInputTokens != null ? settings.maxInputTokens : requiredInput;
+    const ready = eligible(model, settings, maxInput, minimumOutput, requirements);
+    const capable = ready.length ? ready : candidates.filter(offer => matchesRouting(offer, settings) && offerFits(offer, requirements, maxInput, minimumOutput));
+    const maxOutput = configuredOutput ?? explicitOutput ?? Math.max(0, ...capable.map(offer => Math.min(offer.outputTokens, offer.contextTokens - maxInput, hostOutputLimit ?? Infinity, model!.settings?.maxTokens ?? Infinity)));
+    const requestedOutput = explicitOutput ?? Math.min(hostOutputLimit ?? Infinity, maxOutput);
+    if (explicitOutput === undefined) {
+      parsed.max_tokens = requestedOutput;
+      body = JSON.stringify(parsed);
+      if (Buffer.byteLength(body) > this.cfg.opencode.maxRequestBytes) throw new FossaError("REQUEST_TOO_LARGE", "Request exceeds Fossa payload limit.");
+    }
+    if (!Array.isArray(parsed.messages) || !Number.isSafeInteger(maxOutput) || !maxOutput || maxOutput < 1 || maxOutput > outputCap || requiredInput > maxInput || maxInput > Math.min(inputCap, this.cfg.opencode.maxInputTokens) || maxInput + maxOutput > context || !Number.isSafeInteger(requestedOutput) || !requestedOutput || requestedOutput > maxOutput) throw new FossaError("TOKEN_LIMIT", "Request exceeds eligible provider token bounds. Reduce context or output limit before retrying.", { inputBoundSource: exact === undefined ? "serialized_bytes" : "checkpoint_tokenizer", textBound, imageTokens, maxInput, maxOutput });
+    validateBody(parsed, { maxInput, maxOutput, claimEnd: Number.MAX_SAFE_INTEGER }, { model: model.id, exactTextTokens: exact, maxImageTokens: imageLimit, speed_tps: 1, context_tokens: context, max_input_bound: inputCap, output_tokens: outputCap, tools: model.capabilities?.tools === true, input: candidates.flatMap(offer => offer.modalities.input), effort: model.variants?.map(variant => variant.body.reasoning_effort) ?? model.effort });
+    const estimatedInput = Math.min(maxInput, exact ?? estimateInput(requestBytes, { inlineBytes, imageTokens })), estimatedOutput = Math.min(requestedOutput, 256);
+    const prefix = (messages: number) => digest(JSON.stringify({ ...parsed, checkpoint: requirements.checkpoint, messages: parsed.messages.slice(0, messages) }));
+    let prior: Pending | undefined;
+    const prefixes = new Map<number, string>();
+    for (const saved of this.store.cacheHistory(this.account.wallet, session, kind, modelId, this.scope)) {
+      const row = JSON.parse((saved as { state: string }).state) as Pending;
+      if (row.checkpoint !== requirements.checkpoint || !row.provider || !row.usage || !row.cache || row.cache.messages > parsed.messages.length) continue;
+      if (!prefixes.has(row.cache.messages)) prefixes.set(row.cache.messages, prefix(row.cache.messages));
+      if (row.cache.prefix === prefixes.get(row.cache.messages)) { prior = row; break; }
+    }
+    const continued = prior && parsed.messages.slice(prior.cache!.messages).some(message => message && typeof message === "object" && "role" in message && message.role === "assistant");
+    const cached = prior ? Math.min(estimatedInput, prior.usage!.input + (continued ? prior.usage!.output : 0), estimateMessages(parsed.messages.slice(0, Math.max(prior.cache!.messages, parsed.messages.length - 1)), imageLimit)) : 0;
+    const estimate = { input: estimatedInput, cached, output: estimatedOutput, provider: prior?.provider };
+    let ranked = rankOffers(eligible(model, settings, maxInput, maxOutput, requirements), settings, estimate);
+    const admissionAt = Date.now(), admissionDeadline = admissionAt + this.cfg.opencode.requestTimeoutMs;
+    let refresh = true;
+    while (!ranked.length && settling(model, settings, maxInput, maxOutput, requirements) && Date.now() < admissionDeadline) {
+      signal.throwIfAborted();
+      if (this.stopped) throw new FossaError("FOSSA_STOPPED", "Fossa connection closed.");
+      this.progress(callId, { stage: "settling", message: "Waiting for provider capacity…" });
+      if (refresh) { const version = this.catalogVersion; this.updateCatalog(await api<Catalog>(this.account.apiUrl, "/market/catalog?view=directory", { signal }), version); }
+      book = (await this.modelBook(modelId, signal))!;
+      model = book.models.find(value => value.id === modelId);
+      if (!model) throw new FossaError("MODEL_UNAVAILABLE", "Selected Fossa model is unavailable.");
+      if (exact !== undefined && model.offers.some(offer => offer.active && offer.checkpoint === requirements.checkpoint && offer.textCounter?.sha256 !== ref!.sha256)) {
+        throw new FossaError("CATALOG_STALE", "The checkpoint tokenizer changed. Retry with the current catalog.");
+      }
+      if (imageCount && model.offers.some(offer => offer.active && offerFits(offer, requirements) && offer.maxImageTokens !== imageLimit)) {
+        throw new FossaError("CATALOG_STALE", "The checkpoint image limit changed. Retry with the current catalog.");
+      }
+      ranked = rankOffers(eligible(model, settings, maxInput, maxOutput, requirements), settings, estimate);
+      if (!ranked.length && settling(model, settings, maxInput, maxOutput, requirements)) refresh = !await this.waitForCatalog(signal, admissionDeadline);
+    }
+    signal.throwIfAborted();
+    if (this.stopped) throw new FossaError("FOSSA_STOPPED", "Fossa connection closed.");
+    this.quote();
+    admissionWaitMs = Date.now() - admissionAt;
+    const best = ranked[0];
+    if (best) { requirements.checkpoint = best.checkpoint; requirements.allowUnversioned = false; }
+    const minSpeed = settings.mode === "cheapest" ? settings.minSpeed : Math.max(settings.minSpeed, best?.speed ?? 0);
+    const listFeeBps = book.providerListFeeBps;
+    if (!Number.isInteger(listFeeBps) || listFeeBps! < 10 || listFeeBps! > 300 || model.group === undefined) throw new FossaError("CONFIGURATION", "Refresh Fossa protocol configuration before signing.");
+    const withListFee = (base: bigint) => base + (base * BigInt(listFeeBps!) + 9999n) / 10000n;
+    const maxSpend = best ? withListFee(fee(maxInput, best.inputRate) + fee(maxOutput, best.outputRate) + 1n) : 0n;
+    const offers = ranked.filter(offer => offer.checkpoint === requirements.checkpoint && offer.speed >= minSpeed && withListFee(fee(maxInput, offer.inputRate) + fee(maxOutput, offer.outputRate) + 1n) <= maxSpend);
+    if (!offers.length) { const reason = unavailable(model, settings, maxInput, maxOutput); throw new FossaError("NO_PROVIDER", reason.message, { ...reason.data, catalogSlot: book.slot }); }
+    const reserve = offers.reduce((max, offer) => { const value = withListFee(fee(maxInput, offer.inputRate) + fee(maxOutput, offer.outputRate) + 1n); return value > max ? value : max; }, 0n);
+    const selectedModel = model, checkpoint = requirements.checkpoint;
+    const queuedAt = Date.now(), deadline = queuedAt + this.cfg.opencode.requestTimeoutMs;
+    let walletLockMs = 0;
+    const attemptBooking = async () => {
+      const model = selectedModel;
+      signal.throwIfAborted();
+      if (this.stopped) throw new FossaError("FOSSA_STOPPED", "Fossa connection closed.");
       await this.adoptLegacy(); this.assertJournalScope();
       signal.throwIfAborted();
       const existing = this.localRequest(callId);
@@ -565,112 +783,15 @@ export class FossaClient {
         if (existing.provider && existing.endpoint) return this.authorize(existing, existing.automaticOutput === undefined ? body : JSON.stringify({ ...JSON.parse(body), max_tokens: existing.automaticOutput }));
         throw new FossaError("SUBMISSION_UNCERTAIN", "Existing booking is unresolved. Use /fossa to recover it.");
       }
-      if (this.socket?.readyState !== WebSocket.OPEN || Date.now() - this.walletAt > this.cfg.opencode.catalogMaxAgeMs) throw new FossaError("WALLET_SYNCING", "Live wallet data is synchronizing. Try again shortly.");
-      this.quote();
-      if (!this.catalog?.ready || Date.now() - this.catalogAt > this.cfg.opencode.catalogMaxAgeMs) throw new FossaError("CATALOG_STALE", "Fossa catalog is synchronizing. No payment submitted.");
-      let book = (await this.modelBook(modelId, signal))!;
-      let model = book.models.find(model => model.id === modelId);
-      if (!model) throw new FossaError("MODEL_UNAVAILABLE", "Selected Fossa model is unavailable.");
-      const parsed = JSON.parse(body) as { messages: unknown[]; tools?: unknown[]; response_format?: unknown; max_tokens?: number; max_completion_tokens?: number };
-      const settings = this.settings(modelId), requirements = routingRequirements(model, settings);
-      if (!requirements.checkpoint || !model.offers.some(offer => offer.active && offer.checkpoint === requirements.checkpoint)) throw new FossaError("NO_PROVIDER", "No provider matches this model’s published version.");
-      const explicitOutput = hostOutputLimit === undefined ? parsed.max_tokens ?? parsed.max_completion_tokens : undefined;
-      const configuredOutput = settings.advancedRouting ? settings.maxOutputTokens : null;
-      const minimumOutput = configuredOutput ?? explicitOutput ?? 1;
-      const inspected = inspectInput(parsed), { inlineBytes, imageCount } = inspected;
-      const checkpointOffers = model.offers.filter(offer => offer.active && offer.checkpoint === requirements.checkpoint);
-      const ref = checkpointOffers[0]?.textCounter;
-      const exact = !imageCount && ref && checkpointOffers.every(offer => offer.textCounter?.sha256 === ref.sha256)
-        ? await exactTextCount(ref, parsed, signal, request => providerFetch(request, this.account.apiUrl)) : undefined;
-      if (exact !== undefined) requirements.allowUnversioned = false;
-      const textBound = exact ?? inspected.textBound;
-      let imageLimit: number | undefined;
-      if (imageCount) {
-        requirements.inputModalities |= 2;
-        const compatible = model.offers.filter(offer => offer.active && offerFits(offer, requirements) && offer.maxImageTokens != null);
-        if (!compatible.length) throw new FossaError("NO_PROVIDER", "No eligible checkpoint has a published image token limit.");
-        const available = new Set(eligible(model, settings, 0, minimumOutput, requirements));
-        const viable = compatible.filter(offer => {
-          const bound = textBound + imageAllowance(imageCount, offer.maxImageTokens);
-          const input = settings.advancedRouting ? settings.maxInputTokens ?? bound : bound;
-          return bound <= input && input <= this.cfg.opencode.maxInputTokens && offerFits(offer, requirements, input, minimumOutput);
-        });
-        const ready = viable.filter(offer => available.has(offer));
-        const selected = rankOffers(ready.length ? ready : viable, settings)[0] ?? compatible[0];
-        requirements.checkpoint = selected.checkpoint;
-        requirements.allowUnversioned = false;
-        imageLimit = selected.maxImageTokens!;
-      }
-      const candidates = model.offers.filter(offer => offer.active && offerFits(offer, requirements));
-      if (imageCount && candidates.some(offer => offer.maxImageTokens !== imageLimit)) throw new FossaError("CONFIGURATION", "Catalog has inconsistent image token limits.");
-      const context = Math.max(0, ...candidates.map(offer => offer.contextTokens)), inputCap = Math.max(0, ...candidates.map(offer => offer.inputBoundTokens)), outputCap = Math.max(0, ...candidates.map(offer => offer.outputTokens));
-      const imageTokens = imageAllowance(imageCount, imageLimit), requiredInput = textBound + imageTokens;
-      const maxInput = settings.advancedRouting && settings.maxInputTokens != null ? settings.maxInputTokens : requiredInput;
-      const ready = eligible(model, settings, maxInput, minimumOutput, requirements);
-      const capable = ready.length ? ready : candidates.filter(offer => matchesRouting(offer, settings) && offerFits(offer, requirements, maxInput, minimumOutput));
-      const maxOutput = configuredOutput ?? explicitOutput ?? Math.max(0, ...capable.map(offer => Math.min(offer.outputTokens, offer.contextTokens - maxInput, hostOutputLimit ?? Infinity, model!.settings?.maxTokens ?? Infinity)));
-      const requestedOutput = explicitOutput ?? Math.min(hostOutputLimit ?? Infinity, maxOutput);
-      if (explicitOutput === undefined) {
-        parsed.max_tokens = requestedOutput;
-        body = JSON.stringify(parsed);
-        if (Buffer.byteLength(body) > this.cfg.opencode.maxRequestBytes) throw new FossaError("REQUEST_TOO_LARGE", "Request exceeds Fossa payload limit.");
-      }
-      if (!Array.isArray(parsed.messages) || !Number.isSafeInteger(maxOutput) || !maxOutput || maxOutput < 1 || maxOutput > outputCap || requiredInput > maxInput || maxInput > Math.min(inputCap, this.cfg.opencode.maxInputTokens) || maxInput + maxOutput > context || !Number.isSafeInteger(requestedOutput) || !requestedOutput || requestedOutput > maxOutput) throw new FossaError("TOKEN_LIMIT", "Request exceeds eligible provider token bounds. Reduce context or output limit before retrying.", { inputBoundSource: exact === undefined ? "serialized_bytes" : "checkpoint_tokenizer", textBound, imageTokens, maxInput, maxOutput });
-      validateBody(parsed, { maxInput, maxOutput, claimEnd: Number.MAX_SAFE_INTEGER }, { model: model.id, exactTextTokens: exact, maxImageTokens: imageLimit, speed_tps: 1, context_tokens: context, max_input_bound: inputCap, output_tokens: outputCap, tools: model.capabilities?.tools === true, input: candidates.flatMap(offer => offer.modalities.input), effort: model.variants?.map(variant => variant.body.reasoning_effort) ?? model.effort });
       if (this.rows(true).some(row => ["prepared", "sent", "uncertain"].includes(row.stage))) {
         const recoveryAt = Date.now();
         await this.reconcile(true);
         recoveryWaitMs += Date.now() - recoveryAt;
         if (this.rows(true).some(row => ["prepared", "sent", "uncertain"].includes(row.stage))) throw new FossaError("RECOVERY_PENDING", "Previous payment is recovering automatically. Try again once its release is confirmed.");
       }
-      const estimatedInput = Math.min(maxInput, exact ?? estimateInput(requestBytes, { inlineBytes, imageTokens })), estimatedOutput = Math.min(requestedOutput, 256);
-      const prefix = (messages: number) => digest(JSON.stringify({ ...parsed, checkpoint: requirements.checkpoint, messages: parsed.messages.slice(0, messages) }));
-      let prior: Pending | undefined;
-      const prefixes = new Map<number, string>();
-      for (const saved of this.store.cacheHistory(this.account.wallet, session, kind, modelId, this.scope)) {
-        const row = JSON.parse((saved as { state: string }).state) as Pending;
-        if (row.checkpoint !== requirements.checkpoint || !row.provider || !row.usage || !row.cache || row.cache.messages > parsed.messages.length) continue;
-        if (!prefixes.has(row.cache.messages)) prefixes.set(row.cache.messages, prefix(row.cache.messages));
-        if (row.cache.prefix === prefixes.get(row.cache.messages)) { prior = row; break; }
-      }
-      const continued = prior && parsed.messages.slice(prior.cache!.messages).some(message => message && typeof message === "object" && "role" in message && message.role === "assistant");
-      const cached = prior ? Math.min(estimatedInput, prior.usage!.input + (continued ? prior.usage!.output : 0), estimateMessages(parsed.messages.slice(0, Math.max(prior.cache!.messages, parsed.messages.length - 1)), imageLimit)) : 0;
-      const estimate = { input: estimatedInput, cached, output: estimatedOutput, provider: prior?.provider };
-      let ranked = rankOffers(eligible(model, settings, maxInput, maxOutput, requirements), settings, estimate);
-      const admissionAt = Date.now(), admissionDeadline = admissionAt + this.cfg.opencode.requestTimeoutMs;
-      let refresh = true;
-      while (!ranked.length && settling(model, settings, maxInput, maxOutput, requirements) && Date.now() < admissionDeadline) {
-        signal.throwIfAborted();
-        if (this.stopped) throw new FossaError("FOSSA_STOPPED", "Fossa connection closed.");
-        this.progress(callId, { stage: "settling", message: "Waiting for provider capacity…" });
-        if (refresh) { const version = this.catalogVersion; this.updateCatalog(await api<Catalog>(this.account.apiUrl, "/market/catalog?view=directory", { signal }), version); }
-        book = (await this.modelBook(modelId, signal))!;
-        model = book.models.find(value => value.id === modelId);
-        if (!model) throw new FossaError("MODEL_UNAVAILABLE", "Selected Fossa model is unavailable.");
-        if (exact !== undefined && model.offers.some(offer => offer.active && offer.checkpoint === requirements.checkpoint && offer.textCounter?.sha256 !== ref!.sha256)) {
-          throw new FossaError("CATALOG_STALE", "The checkpoint tokenizer changed. Retry with the current catalog.");
-        }
-        if (imageCount && model.offers.some(offer => offer.active && offerFits(offer, requirements) && offer.maxImageTokens !== imageLimit)) {
-          throw new FossaError("CATALOG_STALE", "The checkpoint image limit changed. Retry with the current catalog.");
-        }
-        ranked = rankOffers(eligible(model, settings, maxInput, maxOutput, requirements), settings, estimate);
-        if (!ranked.length && settling(model, settings, maxInput, maxOutput, requirements)) refresh = !await this.waitForCatalog(signal, admissionDeadline);
-      }
-      signal.throwIfAborted();
-      if (this.stopped) throw new FossaError("FOSSA_STOPPED", "Fossa connection closed.");
-      this.quote();
-      admissionWaitMs = Date.now() - admissionAt;
-      const best = ranked[0];
-      if (best) { requirements.checkpoint = best.checkpoint; requirements.allowUnversioned = false; }
-      const minSpeed = settings.mode === "cheapest" ? settings.minSpeed : Math.max(settings.minSpeed, best?.speed ?? 0);
-      const listFeeBps = book.providerListFeeBps;
-      if (!Number.isInteger(listFeeBps) || listFeeBps! < 10 || listFeeBps! > 300 || model.group === undefined) throw new FossaError("CONFIGURATION", "Refresh Fossa protocol configuration before signing.");
-      const withListFee = (base: bigint) => base + (base * BigInt(listFeeBps!) + 9999n) / 10000n;
-      const maxSpend = best ? withListFee(fee(maxInput, best.inputRate) + fee(maxOutput, best.outputRate) + 1n) : 0n;
-      const offers = ranked.filter(offer => offer.checkpoint === requirements.checkpoint && offer.speed >= minSpeed && withListFee(fee(maxInput, offer.inputRate) + fee(maxOutput, offer.outputRate) + 1n) <= maxSpend);
-      if (!offers.length) { const reason = unavailable(model, settings, maxInput, maxOutput); throw new FossaError("NO_PROVIDER", reason.message, { ...reason.data, catalogSlot: book.slot }); }
-      const reserve = offers.reduce((max, offer) => { const value = withListFee(fee(maxInput, offer.inputRate) + fee(maxOutput, offer.outputRate) + 1n); return value > max ? value : max; }, 0n);
+      this.requireLiveWallet();
       let wallet = this.availableWallet();
+      if (this.wallet?.ready && this.wallet.bookings.length && !wallet.bookings.some(slot => slot.status === 5)) return;
       const total = BigInt(wallet.usdcAtomic) + BigInt(wallet.freeAtomic);
       if (total < reserve) throw new FossaError("USDC_REQUIRED", `Add ${atomic(reserve - total)} USDC to ${this.account.wallet} to cover this request's maximum reservation.`, { shortfallAtomic: (reserve - total).toString(), wallet: this.account.wallet });
       const owner = await Keypair.fromSecretKey(Uint8Array.from(this.store.secrets(this.account.walletId).owner));
@@ -679,18 +800,8 @@ export class FossaClient {
         await this.setup(owner, signal);
         for (let attempt = 0; attempt < 2; attempt++) {
           wallet = this.availableWallet();
-          let free = wallet.bookings.find(value => value.status === 5);
-          const poolAt = Date.now(), poolDeadline = poolAt + this.cfg.opencode.requestTimeoutMs;
-          while (!free && Date.now() < poolDeadline) {
-            signal.throwIfAborted(); this.progress(callId, { stage: "settling", message: "Waiting for a provider to release reusable booking storage…" });
-            if (this.stopped) throw new FossaError("FOSSA_STOPPED", "Fossa connection closed.");
-            if (!await this.waitForUpdate(this.walletWaiters, signal, poolDeadline, Math.min(1000, this.cfg.opencode.pollIntervalMs))) await this.refresh();
-            wallet = this.availableWallet(); free = wallet.bookings.find(value => value.status === 5);
-          }
-          bookingPoolWaitMs += Date.now() - poolAt;
-          signal.throwIfAborted();
-          if (this.stopped) throw new FossaError("FOSSA_STOPPED", "Fossa connection closed.");
-          if (!free) throw new FossaError("BOOKING_POOL_BUSY", "Providers have not released booking storage yet. Open /fossa → Rakeback to recover expired reservations.");
+          const free = wallet.bookings.find(value => value.status === 5);
+          if (!free) return;
           const remaining = BigInt(wallet.usdcAtomic) + BigInt(wallet.freeAtomic);
           if (remaining < reserve) throw new FossaError("USDC_REQUIRED", `Add ${atomic(reserve - remaining)} USDC to cover this request's maximum reservation.`);
           const generation = (BigInt(wallet.generation) > BigInt(free.generation) ? BigInt(wallet.generation) : BigInt(free.generation)) + 1n;
@@ -717,7 +828,7 @@ export class FossaClient {
           priceFields.forEach((field, index) => payload.writeUInt32LE(settings[field] === undefined ? 0xffffffff : Math.floor(settings[field]! * 1_000_000), 32 + index * 4));
           payload.writeUInt16LE(minSpeed, 44); payload.writeUInt32LE(maxInput, 46); payload.writeUInt32LE(maxOutput, 50); payload[54] = settings.zdrOnly ? 1 : 0;
           payload.writeBigUInt64LE(reserve, 55); payload.writeUInt32LE(estimatedInput, 63); payload.writeUInt32LE(cached, 67); payload.writeUInt32LE(estimatedOutput, 71);
-          Buffer.from(requirements.checkpoint, "hex").copy(payload, 107); payload[139] = requirements.inputModalities; payload[140] = requirements.outputModalities;
+          Buffer.from(checkpoint, "hex").copy(payload, 107); payload[139] = requirements.inputModalities; payload[140] = requirements.outputModalities;
           payload.writeUInt32LE(requirements.minContext, 141); payload[145] = Number(requirements.limitsConfigured); payload[146] = 1; payload.writeBigUInt64LE(generation, 147);
           if (prior) Buffer.from(new PublicKey(prior.provider!).toBytes()).copy(payload, 75);
           if (scoped && requirements.requiredConcurrency !== 1) { payload[155] = 1; payload.writeUInt32LE(requirements.requiredConcurrency, 156); }
@@ -757,7 +868,7 @@ export class FossaClient {
           if (data[148] !== 0 || data[356] !== (book.providerLimitsEnabled ? 3 : scoped ? 2 : 0)) throw new FossaError("BOOKING_CHANGED", "Booking is no longer available for inference.");
           const provider = new PublicKey(data.subarray(40, 72)).toBase58(), offer = offers.find(offer => offer.provider.wallet === provider && (data[356] === 3 ? offer.providerLimitId === data.readUInt32LE(352) : data[356] === 2 || offer.slot === data.readUInt32LE(352)));
           if (!offer?.provider.endpoint || data.readBigUInt64LE(104) > reserve
-            || !data.subarray(472, 504).equals(Buffer.from(requirements.checkpoint, "hex")) || data.readUInt32LE(504) < Math.max(requirements.minContext, maxInput + maxOutput)
+            || !data.subarray(472, 504).equals(Buffer.from(checkpoint, "hex")) || data.readUInt32LE(504) < Math.max(requirements.minContext, maxInput + maxOutput)
             || data.readUInt32LE(508) < maxInput || data.readUInt32LE(512) < maxOutput
             || (data[516] & requirements.inputModalities) !== requirements.inputModalities || (data[517] & requirements.outputModalities) !== requirements.outputModalities
             || data[518] !== requirements.inputModalities || data[519] !== requirements.outputModalities) throw new FossaError("BOOKING_CHANGED", "Matched provider does not satisfy the authorized request.");
@@ -769,6 +880,30 @@ export class FossaClient {
         }
         throw new FossaError("BOOKING_POOL_BUSY", "Reusable booking storage is synchronizing.");
       } finally { owner.secretKey.fill(0); }
+    };
+    const queueTimeout = AbortSignal.timeout(this.cfg.opencode.requestTimeoutMs);
+    const waiting = AbortSignal.any([signal, this.closing.signal, queueTimeout]);
+    return this.bookingQueue.run(waiting, async () => {
+      walletLockMs = Date.now() - queuedAt;
+      for (;;) {
+        signal.throwIfAborted();
+        if (this.stopped) throw new FossaError("FOSSA_STOPPED", "Fossa connection closed.");
+        if (Date.now() >= deadline) throw bookingSlotTimeout();
+        const lockAt = Date.now(), walletVersion = this.walletVersion;
+        const booking = await this.store.exclusive(this.account.wallet, () => {
+          waiting.throwIfAborted();
+          walletLockMs += Date.now() - lockAt;
+          return attemptBooking();
+        }, waiting);
+        if (booking) return booking;
+        const waitAt = Date.now();
+        this.progress(callId, { stage: "settling", message: "Waiting for a free booking slot…" });
+        if (walletVersion === this.walletVersion && !await this.waitForUpdate(this.walletWaiters, waiting, deadline, Math.min(1000, this.cfg.opencode.pollIntervalMs))) await this.refresh();
+        bookingPoolWaitMs += Date.now() - waitAt;
+      }
+    }).catch(error => {
+      if (error === queueTimeout.reason && queueTimeout.aborted) throw bookingSlotTimeout();
+      throw error;
     });
   }
   private signedHeaders(row: Pending, hash: string) {
@@ -880,6 +1015,6 @@ export class FossaClient {
     return new Response(body, { status: response.status, statusText: response.statusText, headers });
   }
   failed(id: string) { const row = this.localRequest(id); if (row && ["prepared", "sent", "matched", "inference"].includes(row.stage)) { row.stage = "uncertain"; this.store.put(row); void this.recoverPending(); } }
-  stop() { this.stopped = true; clearTimeout(this.retry); clearInterval(this.timer); clearInterval(this.rakebackTimer); this.socket?.close(); for (const wake of this.catalogWaiters) wake(); this.wakeWallet(); }
+  stop() { this.stopped = true; this.closing.abort(new FossaError("FOSSA_STOPPED", "Fossa connection closed.")); clearTimeout(this.retry); clearInterval(this.timer); clearInterval(this.rakebackTimer); this.socket?.close(); for (const wake of this.catalogWaiters) wake(); this.wakeWallet(); }
   async drain() { this.stop(); await Promise.allSettled([this.refreshing, this.recovering, this.rakebackRunning, ...this.cancellations.values()]); }
 }
