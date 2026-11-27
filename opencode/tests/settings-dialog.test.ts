@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { Context } from "@opencode/plugin/tui/context";
-import { RGBA, InputRenderable, type Renderable, type BoxRenderable } from "@opentui/core";
+import { RGBA, InputRenderable, type Renderable, type BoxRenderable, type TextRenderable } from "@opentui/core";
 import { testRender, useRenderer } from "@opentui/solid";
 import { createSignal } from "solid-js";
 import { jsx, type JSX } from "@opentui/solid/jsx-runtime";
@@ -61,6 +61,25 @@ test("packaged dialog keeps navigation, page updates, search and prompts reactiv
     input.cursorOffset = 3; input.insertText("🌏é"); input.deleteCharBackward();
     expect(input.value).toBe("*******"); run("submit"); expect(await secret).toBe("sec🌏ret");
     expect(input.value).toBe(""); expect(await frame()).not.toContain("secret");
+    const rent = { title: "Prepare 2 new booking slots", message: "Your wallet will set aside up to 0.00658368 SOL in refundable account rent and pay transaction fees." };
+    for (const width of [36, 72]) {
+      t.renderer.resize(width, 14);
+      const cancelled = dialog.confirm(rent);
+      const screen = await frame();
+      expect(screen).toContain("Prepare 2 new booking"); expect(screen).toContain("0.00658368 SOL"); expect(screen).toMatch(/Cancel +Continue/);
+      const cancel = find(t.renderer.root, "fossa-confirm-cancel") as BoxRenderable, proceed = find(t.renderer.root, "fossa-confirm-continue") as BoxRenderable;
+      expect(cancel.y).toBe(proceed.y); expect(Math.abs(cancel.width - proceed.width)).toBeLessThanOrEqual(1);
+      expect(cancel.backgroundColor.equals(destructive)).toBe(true);
+      const label = proceed.getChildren()[0] as TextRenderable;
+      expect(proceed.backgroundColor.equals(focused)).toBe(true); expect(label.attributes).toBe(0);
+      await t.mockMouse.moveTo(proceed.x + 1, proceed.y); await frame();
+      expect(proceed.backgroundColor.equals(focused)).toBe(true); expect(label.attributes).toBe(1);
+      await t.mockMouse.moveTo(cancel.x + 1, cancel.y); await frame();
+      expect(proceed.backgroundColor.equals(focused)).toBe(true); expect(label.attributes).toBe(0);
+      await t.mockMouse.click(cancel.x + 1, cancel.y); expect(await cancelled).toBe(false);
+      const confirmed = dialog.confirm(rent); await frame(); run("left"); run("next"); run("submit"); expect(await confirmed).toBe(true);
+      const escaped = dialog.confirm(rent); await frame(); run("back"); expect(await escaped).toBe(false);
+    }
     const dismissed = dialog.prompt({ title: "Password", password: true }); await frame(); await t.mockInput.typeText("discard");
     dialog.close(); expect(await dismissed).toBeUndefined();
   } finally { dialog.close(); await t.dispose(); }

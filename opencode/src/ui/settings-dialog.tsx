@@ -5,12 +5,14 @@ import { jsx, type JSX } from "opentui:runtime-module:%40opentui%2Fsolid%2Fjsx-r
 
 const Conditional: (props: { when: unknown; fallback?: JSX.Element; children: JSX.Element }) => JSX.Element = Show;
 
-type Page = { kind: "select" | "alert" | "prompt"; title: string; message?: string; description?: string; placeholder?: string; password?: boolean; search?: boolean; current?: string; options?: readonly (DialogSelectOption<string> & { loading?: boolean })[]; onDelete?: (value: string) => Promise<void> };
+type Page = { kind: "select" | "alert" | "prompt" | "confirm"; title: string; message?: string; description?: string; placeholder?: string; password?: boolean; search?: boolean; current?: string; options?: readonly (DialogSelectOption<string> & { loading?: boolean })[]; onDelete?: (value: string) => Promise<void> };
 
 export function settingsDialog(context: Context) {
   const [page, setPage] = createSignal<Page>({ kind: "select", title: "Fossa Settings" }), [selected, setSelected] = createSignal(0), [value, setValue] = createSignal(""), [query, setQuery] = createSignal(""), [busy, setBusy] = createSignal(false), [active, setActive] = createSignal(false);
   const [deleting, setDeleting] = createSignal<string>();
+  const [actionFocused, setActionFocused] = createSignal(false);
   const theme = () => context.theme.surface("dialog");
+  const confirming = () => page().kind === "confirm";
   const options = createMemo(() => {
     const words = query().trim().toLowerCase().split(/\s+/);
     return (page().options ?? []).filter(item => words.every(word => `${item.title} ${item.description ?? ""} ${item.category ?? ""} ${item.footer ?? ""}`.toLowerCase().includes(word)));
@@ -40,8 +42,9 @@ export function settingsDialog(context: Context) {
     for (const key of ["undo", "redo"] as const) { const original = node[key].bind(node); node[key] = () => page().password ? false : original(); }
     focus();
   };
-  const submit = () => { const item = options()[selected()]; if (page().kind === "prompt") finish(value()); else if (page().kind === "alert") finish(); else if (item && !item.disabled) finish(item.value); };
+  const submit = () => { const item = options()[selected()]; if (confirming()) finish(selected() === 1 ? "continue" : undefined); else if (page().kind === "prompt") finish(value()); else if (page().kind === "alert") finish(); else if (item && !item.disabled) finish(item.value); };
   const select = (index: number) => { if (!busy() && index !== selected()) { setSelected(index); setDeleting(undefined); } };
+  const focusAction = (index: number) => { select(index); setActionFocused(true); };
   const remove = async () => {
     const item = options()[selected()], onDelete = page().onDelete;
     if (busy() || !item || !onDelete) return;
@@ -51,6 +54,7 @@ export function settingsDialog(context: Context) {
   };
   const focus = () => queueMicrotask(() => { const node = page().kind === "select" ? page().search ? search : undefined : input; if (node && !node.isDestroyed) node.focus(); });
   const height = () => {
+    if (confirming()) return "auto" as const;
     if (page().kind !== "select") return Math.min(20, context.renderer.height - 4);
     const width = Math.max(1, Math.min(72, context.renderer.width - 12)), lines = (text: string) => text.split("\n").reduce((sum, line) => sum + Math.max(1, Math.ceil(line.length / width)), 0);
     const categories = (page().options ?? []).filter((item, index, all) => item.category && item.category !== all[index - 1]?.category).length;
@@ -65,7 +69,7 @@ export function settingsDialog(context: Context) {
   };
   const present = (next: Page, initial = "", current?: string): Promise<string | undefined> => {
     if (!active()) return Promise.resolve(undefined);
-    batch(() => { setValue(initial); setQuery(""); setDeleting(undefined); setSelected(Math.max(0, next.options?.findIndex(item => current === undefined ? !item.disabled : item.value === current) ?? 0)); setPage(next); setBusy(false); });
+    batch(() => { setValue(initial); setQuery(""); setDeleting(undefined); setActionFocused(false); setSelected(next.kind === "confirm" ? 1 : Math.max(0, next.options?.findIndex(item => current === undefined ? !item.disabled : item.value === current) ?? 0)); setPage(next); setBusy(false); });
     scroll?.scrollTo(0);
     const result = new Promise<string | undefined>(done => { resolve = done; });
     if (!mounted) {
@@ -84,7 +88,21 @@ export function settingsDialog(context: Context) {
             });
           } });
         } }),
-        jsx("scrollbox", { ref: (node: ScrollBoxRenderable) => { scroll = node; }, flexGrow: 1, scrollX: false, paddingLeft: 1, paddingRight: 1,
+        createComponent(Conditional, { get when() { return confirming(); }, get children() {
+          return jsx("box", { paddingLeft: 4, paddingRight: 4, paddingTop: 1, gap: 1, get children() { return [
+            jsx("text", { wrapMode: "word", get fg() { return theme().text.base; }, get children() { return page().message; } }),
+            jsx("box", { flexDirection: "row", gap: 1, flexShrink: 0, get children() {
+              return ["Cancel", "Continue"].map((label, index) => jsx("box", {
+                id: `fossa-confirm-${label.toLowerCase()}`, flexBasis: 0, flexGrow: 1, minWidth: 0, height: context.renderer.height < 14 ? 1 : 3, alignItems: "center", justifyContent: "center",
+                get backgroundColor() { return index === 0 ? theme().background.action.destructive.focused : theme().background.action.primary.focused; },
+                onMouseOver: () => focusAction(index), onMouseOut: () => { if (selected() === index) setActionFocused(false); }, onMouseDown: () => focusAction(index), onMouseUp: () => { select(index); submit(); },
+                get children() { return jsx("text", { get attributes() { return actionFocused() && selected() === index ? 1 : 0; },
+                  get fg() { return index === 0 ? theme().text.action.destructive.focused : theme().text.action.primary.focused; }, children: label }); },
+              }));
+            } }),
+          ]; } });
+        } }),
+        jsx("scrollbox", { get visible() { return !confirming(); }, ref: (node: ScrollBoxRenderable) => { scroll = node; }, flexGrow: 1, scrollX: false, paddingLeft: 1, paddingRight: 1,
           get marginTop() { return page().kind === "select" && page().search ? 0 : 1; }, get children() { return [
             createComponent(Conditional, { get when() { return page().message || page().description; }, get children() {
               return jsx("box", { paddingLeft: 3, paddingRight: 3, paddingBottom: 1, gap: 1, get children() { return [
@@ -144,7 +162,7 @@ export function settingsDialog(context: Context) {
             jsx("text", { get fg() { return theme().text.muted; }, children: "delete" }),
           ]; } });
         } }),
-        createComponent(Conditional, { get when() { return page().kind !== "select"; }, get children() {
+        createComponent(Conditional, { get when() { return page().kind === "prompt" || page().kind === "alert"; }, get children() {
           return jsx("box", { paddingLeft: 4, marginTop: 1, get children() {
             return jsx("text", { get fg() { return theme().text.base; }, attributes: 1, onMouseUp: submit, get children() { return page().kind === "alert" ? "OK" : "Save"; } });
           } });
@@ -156,6 +174,10 @@ export function settingsDialog(context: Context) {
   context.keymap.layer(() => ({ mode: "modal", priority: 200, enabled: active, commands: [
     { id: "fossa.dialog.back", bind: "escape", run: () => finish() },
     { id: "fossa.dialog.submit", bind: "return", run: submit },
+    { id: "fossa.dialog.left", bind: "left", enabled: confirming, run: () => focusAction(0) },
+    { id: "fossa.dialog.right", bind: "right", enabled: confirming, run: () => focusAction(1) },
+    { id: "fossa.dialog.next", bind: "tab", enabled: confirming, run: () => focusAction(actionFocused() ? 1 - selected() : 0) },
+    { id: "fossa.dialog.previous", bind: "shift+tab", enabled: confirming, run: () => focusAction(actionFocused() ? 1 - selected() : 1) },
     { id: "fossa.dialog.up", bind: "up", enabled: () => page().kind === "select", run: () => move(-1) },
     { id: "fossa.dialog.down", bind: "down", enabled: () => page().kind === "select", run: () => move(1) },
     { id: "fossa.dialog.delete", bind: "ctrl+d", enabled: () => page().kind === "select" && !!page().onDelete, run: remove },
@@ -171,6 +193,7 @@ export function settingsDialog(context: Context) {
     close: () => { clearInput(); if (mounted) context.ui.dialog.clear(); else setActive(false); },
     select: (options: Omit<Page, "kind"> & { current?: string }) => present({ ...options, kind: "select" }, "", options.current),
     alert: async (options: { title: string; message: string }) => { await present({ ...options, kind: "alert" }); },
-    prompt: (options: { title: string; description?: string; placeholder?: string; value?: string; password?: boolean }) => present({ ...options, kind: "prompt" }, options.value),
+    confirm: async (options: { title: string; message: string }) => (await present({ ...options, kind: "confirm" })) === "continue",
+    prompt: (options: { title: string; message?: string; description?: string; placeholder?: string; value?: string; password?: boolean }) => present({ ...options, kind: "prompt" }, options.value),
   };
 }

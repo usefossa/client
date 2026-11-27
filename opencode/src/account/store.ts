@@ -8,12 +8,16 @@ import { defaultSettings, priceFields, validateSettings } from "../inference/rou
 import { defaultRakeback, validateRakeback } from "../inference/rakeback";
 import { FossaError, type Account, type Settings, type WalletSecrets } from "../types";
 import { walletDirectory } from "./paths";
+import { BookingQueue } from "../inference/queue";
 
+const walletQueues = new Map<string, BookingQueue>();
 const derive = (passphrase: string, salt: Buffer) => new Promise<Buffer>((resolve, reject) => scrypt(passphrase, salt, 32, { N: 65536, r: 8, p: 1, maxmem: 128 * 1024 * 1024 }, (error, key) => error ? reject(error) : resolve(key)));
 type Sealed = { protection?: "device" | "passphrase"; salt: string; iv: string; tag: string; ciphertext: string };
 export type JournalScope = { program: string; market: string; lane: string; genesis?: string; mint?: string };
 const terminalStages = "'settled','released','failed','expired'";
-const scopeWhere = "json_extract(state,'$.scope.program')=? AND json_extract(state,'$.scope.market')=? AND json_extract(state,'$.scope.lane')=? AND json_extract(state,'$.scope.genesis')=? AND json_extract(state,'$.scope.mint')=?";
+const scopeFields = ["program", "market", "lane", "genesis", "mint"].map(field => `json_extract(state,'$.scope.${field}')`);
+const scopeWhere = scopeFields.map(field => `${field}=?`).join(" AND ");
+const generationField = "ltrim(json_extract(state,'$.generation'),'0')";
 const scopeValues = (scope: JournalScope) => [scope.program, scope.market, scope.lane, scope.genesis ?? "", scope.mint ?? ""];
 export interface Pending { textCounterHash?: string; automaticOutput?: number; sourceBodyHash?: string; checkpoint?: string; scope?: JournalScope; providerList?: string; source?: string; rentLamports?: string; previousRequestId?: string; previousResponseFinishedAt?: number; requestGapMs?: number; gapToSubmitMs?: number; gapToProviderMs?: number; modelRequestAt?: number; transportReceivedAt?: number; walletLockMs?: number; recoveryWaitMs?: number; admissionWaitMs?: number; bookingPoolWaitMs?: number; bookingObservedAt?: number; providerDispatchedAt?: number; responseHeadersAt?: number; firstByteAt?: number; responseDoneAt?: number; responseFinishedAt?: number; responseCompleted?: boolean; settlementSlot?: number; settledAt?: number; confirmationMs?: number; cancelRequested?: boolean; cancelSent?: boolean; id: string; wallet: string; model: string; bodyHash: string; cache?: { messages: number; prefix: string }; kind: string; flow?: string; session: string; booking: string; generation: string; signature: string; transaction: string; expiry: number; reserve: string; stage: string; provider?: string; providerName?: string; endpoint?: string; claimEnd?: number; charge?: string; deposit?: string; withdrawal?: string; refund?: string; feeLamports?: string; processedSlot?: number; startedAt?: number; submittedAt?: number; prepareMs?: number; broadcastMs?: number; processedMs?: number; bookingSource?: "stream" | "rpc"; dispatchStarted?: boolean; providerRequestMs?: number; sendToProviderMs?: number; usage?: { input: number; cached: number; output: number }; created: number; error?: string }
 
@@ -44,6 +48,13 @@ export class Store {
     this.db.exec("PRAGMA synchronous=FULL");
     this.db.exec("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=10000; CREATE TABLE IF NOT EXISTS wallets(id TEXT PRIMARY KEY,address TEXT NOT NULL,name TEXT NOT NULL,sealed TEXT NOT NULL,settings TEXT); CREATE TABLE IF NOT EXISTS pending(id TEXT PRIMARY KEY,wallet TEXT NOT NULL,state TEXT NOT NULL,created INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS pending_wallet_created ON pending(wallet,created); CREATE TABLE IF NOT EXISTS model_settings(wallet TEXT NOT NULL,model TEXT NOT NULL,settings TEXT NOT NULL,PRIMARY KEY(wallet,model)); CREATE TABLE IF NOT EXISTS locks(wallet TEXT PRIMARY KEY,owner TEXT NOT NULL,pid INTEGER NOT NULL,expires INTEGER NOT NULL)");
     this.migrateJournal();
+    this.indexBookingQueries();
+  }
+  indexBookingQueries() {
+    this.db.exec(`CREATE INDEX IF NOT EXISTS pending_active ON pending(wallet,created) WHERE json_extract(state,'$.stage') NOT IN (${terminalStages});
+      CREATE INDEX IF NOT EXISTS pending_processed_slot ON pending(wallet,json_extract(state,'$.processedSlot'));
+      CREATE INDEX IF NOT EXISTS pending_settlement_slot ON pending(wallet,json_extract(state,'$.settlementSlot'));
+      CREATE INDEX IF NOT EXISTS pending_generation ON pending(wallet,${scopeFields.join(",")},length(${generationField}) DESC,${generationField} DESC) WHERE json_extract(state,'$.stage') NOT IN ('failed','expired')`);
   }
   migrateJournal() {
     if (this.journalMigrated) return;
@@ -146,6 +157,13 @@ export class Store {
   lock(id?: string) { for (const [key, secrets] of this.keys) if (!id || key === id) { secrets.owner.fill(0); secrets.lane?.fill(0); Object.values(secrets.bookings).forEach(value => value.fill(0)); this.keys.delete(key); } }
   lockProtected() { for (const id of this.keys.keys()) if (this.security(id).protected) this.lock(id); }
   wallets() { return this.db.query("SELECT id,address,name FROM wallets ORDER BY name").all() as { id: string; address: string; name: string }[]; }
+  bookingPool(id: string): { target?: number; addresses: string[] } {
+    const row = this.db.query("SELECT json_extract(settings,'$.bookingPool') AS pool FROM wallets WHERE id=?").get(id) as { pool: string | null } | null;
+    return row?.pool ? JSON.parse(row.pool) : { addresses: [] };
+  }
+  saveBookingPool(id: string, pool: { target?: number; addresses: string[] }) {
+    this.db.query("UPDATE wallets SET settings=json_set(coalesce(settings,'{}'),'$.bookingPool',json(?)) WHERE id=?").run(JSON.stringify(pool), id);
+  }
   deleteWallet(id: string) {
     const wallet = this.wallets().find(wallet => wallet.id === id);
     if (!wallet) return [];
@@ -197,13 +215,17 @@ export class Store {
     return (this.db.query(`SELECT state FROM pending WHERE wallet=? AND (json_extract(state,'$.scope.genesis') IS NULL OR json_extract(state,'$.scope.mint') IS NULL) AND json_extract(state,'$.stage') NOT IN (${terminalStages})`).all(wallet) as { state: string }[]).map(row => JSON.parse(row.state) as Pending);
   }
   accounting(wallet: string, slot: number, genesis?: string) {
-    return (this.db.query(`SELECT state FROM pending WHERE wallet=?${genesis ? " AND json_extract(state,'$.scope.genesis')=?" : ""} AND json_extract(state,'$.stage') NOT IN ('failed','expired') AND (json_extract(state,'$.processedSlot')>? OR json_extract(state,'$.settlementSlot')>? OR (json_extract(state,'$.processedSlot') IS NULL AND json_extract(state,'$.stage') NOT IN (${terminalStages}))) ORDER BY created`).all(wallet, ...(genesis ? [genesis] : []), slot, slot) as { state: string }[]).map(row => JSON.parse(row.state) as Pending);
+    return (this.db.query(`SELECT state FROM pending WHERE rowid IN (
+      SELECT rowid FROM pending WHERE wallet=? AND json_extract(state,'$.processedSlot')>?
+      UNION SELECT rowid FROM pending WHERE wallet=? AND json_extract(state,'$.settlementSlot')>?
+      UNION SELECT rowid FROM pending WHERE wallet=? AND json_extract(state,'$.processedSlot') IS NULL AND json_extract(state,'$.stage') NOT IN (${terminalStages})
+    ) AND json_extract(state,'$.stage') NOT IN ('failed','expired')${genesis ? " AND json_extract(state,'$.scope.genesis')=?" : ""} ORDER BY created`).all(wallet, slot, wallet, slot, wallet, ...(genesis ? [genesis] : [])) as { state: string }[]).map(row => JSON.parse(row.state) as Pending);
   }
   history(wallet: string, scope?: JournalScope) {
     return this.db.query(`SELECT id,json_extract(state,'$.booking') AS booking,json_extract(state,'$.generation') AS generation,json_extract(state,'$.charge') AS charge,json_extract(state,'$.stage') AS stage FROM pending WHERE wallet=? AND json_extract(state,'$.kind')='inference'${scope ? ` AND ${scopeWhere}` : ""}`).all(wallet, ...(scope ? scopeValues(scope) : [])) as { id: string; booking: string; generation: string; charge?: string; stage: string }[];
   }
   generation(wallet: string, scope: JournalScope) {
-    const row = this.db.query(`SELECT ltrim(json_extract(state,'$.generation'),'0') AS generation FROM pending WHERE wallet=? AND ${scopeWhere} AND json_extract(state,'$.stage') NOT IN ('failed','expired') ORDER BY length(generation) DESC,generation DESC LIMIT 1`).get(wallet, ...scopeValues(scope)) as { generation: string } | null;
+    const row = this.db.query(`SELECT ${generationField} AS generation FROM pending WHERE wallet=? AND ${scopeWhere} AND json_extract(state,'$.stage') NOT IN ('failed','expired') ORDER BY length(${generationField}) DESC,${generationField} DESC LIMIT 1`).get(wallet, ...scopeValues(scope)) as { generation: string } | null;
     return BigInt(row?.generation || "0");
   }
   cacheHistory(wallet: string, session: string, flow: string, model: string, scope?: JournalScope) {
@@ -251,9 +273,17 @@ export class Store {
     if (saved?.state === state) return;
     this.db.query("INSERT INTO pending VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET state=excluded.state").run(value.id, value.wallet, state, value.created);
   }
-  async exclusive<T>(wallet: string, action: () => Promise<T>) {
+  async exclusive<T>(wallet: string, action: () => Promise<T>, signal?: AbortSignal) {
+    const key = `${this.db.filename}:${wallet}`;
+    const queue = walletQueues.get(key) ?? new BookingQueue();
+    walletQueues.set(key, queue);
+    try { return await queue.run(signal, () => this.lockWallet(wallet, action, signal)); }
+    finally { if (queue.idle && walletQueues.get(key) === queue) walletQueues.delete(key); }
+  }
+  private async lockWallet<T>(wallet: string, action: () => Promise<T>, signal?: AbortSignal) {
     const owner = randomUUID(), deadline = Date.now() + 60_000;
     while (true) {
+      signal?.throwIfAborted();
       const old = this.db.query("SELECT pid,expires FROM locks WHERE wallet=?").get(wallet) as { pid: number; expires: number } | null;
       if (old && old.expires < Date.now()) { let alive = true; try { process.kill(old.pid, 0); } catch { alive = false; } if (!alive) this.db.query("DELETE FROM locks WHERE wallet=? AND pid=?").run(wallet, old.pid); }
       if (this.db.query("INSERT OR IGNORE INTO locks VALUES(?,?,?,?)").run(wallet, owner, process.pid, Date.now() + 60_000).changes) break;
@@ -272,6 +302,7 @@ export function localStore() {
   const store = cache[shared] ??= new Store();
   Object.setPrototypeOf(store, Store.prototype);
   store.migrateJournal();
+  store.indexBookingQueries();
   store.db.exec("CREATE TABLE IF NOT EXISTS model_settings(wallet TEXT NOT NULL,model TEXT NOT NULL,settings TEXT NOT NULL,PRIMARY KEY(wallet,model)); CREATE INDEX IF NOT EXISTS pending_wallet_created ON pending(wallet,created)");
   return store;
 }

@@ -54,6 +54,7 @@ export default Plugin.define({
     });
     const timer = setInterval(() => void sync(), 5000); void sync();
     const problem = (error: unknown) => context.ui.toast.show({ title: "Fossa", message: errorMessage(error), variant: "error", duration: 6000 });
+    const bookingPool = () => rpc.bookingPool({}) as Promise<{ wallet: string; slots: number; target: number; rentLamports: string; walletRentLamports: string }>;
     const currentModel = async () => {
       const selected = context.ui.model.current(); if (selected?.providerID !== "fossa") throw Error("Select a Fossa model first.");
       return await models.get(selected.modelID);
@@ -307,10 +308,12 @@ export default Plugin.define({
     };
     const menu = async () => {
       let settings = details()?.settings, amount: string | undefined, modelLoading = context.ui.model.current()?.providerID === "fossa", amountLoading = true, closed = false;
+      let slotCount: string | undefined, slotsLoading = true;
       const page = () => ({ title: "Fossa Settings", search: true, options: [
         { title: "Account", value: "status", category: "Wallet" },
         { title: "Security", value: "security", category: "Wallet" },
         { title: "Saved wallets", value: "wallets", category: "Wallet" },
+        { title: "Booking slots", value: "booking-slots", category: "Wallet", footer: slotCount ?? "—", loading: slotsLoading },
         { title: "Rakeback", value: "rakeback", category: "Wallet", footer: amount === undefined ? "—" : rakebackDollars(amount), loading: amountLoading },
         { title: "Methodology", value: "methodology", category: "Routing", footer: settings ? settings.mode[0].toUpperCase() + settings.mode.slice(1) : "—", loading: !settings && modelLoading },
         { title: "Advanced options", value: "advanced", category: "Routing", footer: settings?.advancedRouting ? "On" : "Off", loading: !settings && modelLoading },
@@ -323,6 +326,7 @@ export default Plugin.define({
       const selection = dialog.select(page()), update = () => { if (!closed && !stopped) dialog.update("Fossa Settings", page()); };
       void currentModel().then(model => { settings = model.settings; }, () => { settings = undefined; }).finally(() => { modelLoading = false; update(); });
       void rpc.rakeback({}).then(value => { amount = (value as RakebackState).availableAtomic; }, () => {}).finally(() => { amountLoading = false; update(); });
+      void bookingPool().then(pool => { slotCount = `${pool.target}/${pool.slots}`; }, () => {}).finally(() => { slotsLoading = false; update(); });
       try { return await selection; } finally { closed = true; }
     };
     const show = async (action?: string) => {
@@ -340,6 +344,20 @@ export default Plugin.define({
             else if (value === "endpoint") await endpoint();
             else if (value === "methodology") await methodology();
             else if (value === "advanced") await advanced();
+            else if (value === "booking-slots") {
+              const pool = await bookingPool();
+              const raw = await dialog.prompt({ title: "Booking slots", value: String(pool.target), message: `${pool.slots} ${pool.slots === 1 ? "slot already exists" : "slots already exist"}.`, description: "Choose how many slots to use (1–64). Lowering the limit keeps existing slots." });
+              if (!raw) continue;
+              const target = Number(raw.trim());
+              if (!Number.isInteger(target) || target < 1 || target > 64) throw Error("Choose a whole number from 1 to 64.");
+              const added = Math.max(0, target - pool.slots), maxRent = BigInt(pool.walletRentLamports) + BigInt(pool.rentLamports) * BigInt(added);
+              if (added || maxRent > 0n) {
+                const title = added ? `Prepare ${added} new booking slot${added === 1 ? "" : "s"}` : "Prepare wallet for booking";
+                if (!await dialog.confirm({ title, message: `Your wallet will set aside up to ${Number(maxRent) / 1e9} SOL in refundable account rent and pay transaction fees.` })) continue;
+              }
+              const updated = await rpc.bookingPool({ target, wallet: pool.wallet, maxRentLamports: maxRent.toString() }) as { target: number; slots: number };
+              context.ui.toast.show({ title: "Booking slots ready", message: `This wallet can use up to ${updated.target} slots.`, variant: "success" });
+            }
             else if (value === "version") await versions();
             else if (value === "modalities") await modalities();
             else if (value === "limits") await tokenLimits();
